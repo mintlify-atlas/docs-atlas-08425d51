@@ -1,0 +1,154 @@
+---
+title: Local Development Setup
+description: Set up your local development environment for CFB Marble Game
+---
+
+This guide will walk you through setting up the CFB Marble Game project for local development.
+
+## Prerequisites
+
+Before you begin, ensure you have the following installed:
+
+- Docker and Docker Compose
+- [mkcert](https://github.com/FiloSottile/mkcert) for generating locally-trusted SSL certificates
+- Basic familiarity with command line tools
+
+## Setup Process
+
+<Steps>
+  <Step title="Configure Hosts File">
+    Add the following entry to your [hosts file](https://linuxize.com/post/how-to-edit-your-hosts-file/):
+
+    ```
+    127.0.0.1 cfbmarblegame.test
+    ```
+
+    **Location by OS:**
+    - Linux/macOS: `/etc/hosts`
+    - Windows: `C:\Windows\System32\drivers\etc\hosts`
+
+    You'll need administrator/root privileges to edit this file.
+  </Step>
+
+  <Step title="Generate SSL Certificates">
+    Install and configure [mkcert](https://github.com/FiloSottile/mkcert) to generate locally-trusted development certificates:
+
+    ```bash
+    # Install mkcert (macOS example)
+    brew install mkcert
+
+    # Install the local CA
+    mkcert -install
+
+    # Generate certificate for cfbmarblegame.test
+    mkcert cfbmarblegame.test
+    ```
+
+    This creates certificate files that Traefik will use to serve the application over HTTPS.
+  </Step>
+
+  <Step title="Set Up Traefik Network">
+    Create a separate Docker Compose project that runs [Traefik](https://traefik.io/traefik) on an external network:
+
+    ```bash
+    # Create the external Docker network
+    docker network create traefik
+    ```
+
+    You'll need a Traefik Docker Compose configuration that:
+    - Runs on the `traefik` network
+    - Listens on ports 80 and 443
+    - Uses the mkcert certificates you generated
+    - Has the `websecure` entrypoint configured
+
+    The CFB Marble Game application will connect to this Traefik instance via the external `traefik` network.
+  </Step>
+
+  <Step title="Configure Environment Variables">
+    Copy the example environment file and configure it:
+
+    ```bash
+    cd app
+    cp .env.example .env
+    ```
+
+    Edit `.env` and set your desired values:
+
+    ```bash
+    DEBUG_MODE=true
+    LOG_LEVEL=debug
+    ```
+
+    The database path is configured via Docker Compose and defaults to `/var/www/data/cfbmarblegame.db`.
+  </Step>
+
+  <Step title="Start the Development Server">
+    From the project root, start the Docker Compose services:
+
+    ```bash
+    docker compose up
+    ```
+
+    This will:
+    - Build the web container with development dependencies
+    - Enable Xdebug for debugging
+    - Mount the `app/` directory as a volume for hot-reloading
+    - Connect to the Traefik network
+    - Configure Traefik labels for HTTPS routing
+  </Step>
+
+  <Step title="Access the Application">
+    Once the containers are running, open your browser and navigate to:
+
+    ```
+    https://cfbmarblegame.test
+    ```
+
+    You should see the College Football Marble Game homepage. The SSL certificate will be trusted because you installed the mkcert CA in Step 2.
+  </Step>
+</Steps>
+
+## Development Configuration
+
+The local development environment uses `docker-compose.override.yml` to apply development-specific settings:
+
+### Build Arguments
+- `DEV_DEPS=1` - Installs development dependencies
+
+### Environment Variables
+- `ENABLE_PHP_DEV_CONFIG=1` - Enables PHP development configuration
+- `ENABLE_XDEBUG=1` - Enables Xdebug for debugging
+
+### Volumes
+- `./app/:/var/www:delegated` - Mounts the app directory for live code changes
+
+### Traefik Labels
+The application is configured with the following Traefik routing:
+- **Host**: `cfbmarblegame.test`
+- **Entrypoint**: `websecure` (HTTPS)
+- **TLS**: Enabled
+
+## Troubleshooting
+
+### Cannot access https://cfbmarblegame.test
+- Verify the hosts file entry is correct
+- Ensure Traefik is running and connected to the `traefik` network
+- Check that Docker Compose services are running: `docker compose ps`
+
+### SSL certificate errors
+- Run `mkcert -install` to install the local CA
+- Regenerate certificates if needed: `mkcert cfbmarblegame.test`
+- Restart your browser after installing the CA
+
+### Code changes not reflected
+- Ensure the volume mount is working: `docker compose ps`
+- Check file permissions on the `app/` directory
+- For PHP configuration changes, restart the container: `docker compose restart web`
+
+## Next Steps
+
+Now that your local environment is set up, you can:
+
+- [Run database migrations](/development/database-migrations)
+- [Run tests](/development/testing)
+- Start developing new features

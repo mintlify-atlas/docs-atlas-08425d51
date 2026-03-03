@@ -1,0 +1,275 @@
+---
+title: Docker Setup
+description: Learn about the CFB Marble Game Docker architecture, multi-stage builds, and nginx + PHP-FPM configuration
+---
+
+## Overview
+
+The CFB Marble Game uses a sophisticated multi-stage Docker build that combines nginx and PHP-FPM in a single container, managed by s6-overlay. This architecture provides optimal performance for production deployments.
+
+## Dockerfile Architecture
+
+The Dockerfile uses a multi-stage build with three primary stages:
+
+### Stage 1: Tailwind CSS Build
+
+```dockerfile
+FROM node:22-alpine AS tailwind
+
+WORKDIR /build
+COPY app/package*.json ./
+RUN npm install
+COPY app/. .
+ENV NODE_ENV production
+RUN npm run build
+```
+
+This stage:
+- Uses Node.js 22 Alpine for minimal image size
+- Installs npm dependencies
+- Builds production CSS assets with Tailwind
+- Outputs compiled assets to `/build/dist/`
+
+### Stage 2: Production Image
+
+```dockerfile
+FROM php:8.4.3-fpm-bookworm AS prod
+LABEL maintainer="Kevin Smith <kevin@kevinsmith.io>"
+```
+
+The production stage includes:
+
+#### PHP Extensions
+
+Installed PHP extensions for application functionality:
+- **GD** - Image manipulation (with freetype and jpeg support)
+- **Xdebug 3.4.0** - Development debugging (disabled by default)
+- **intl** - Internationalization
+- **zip** - Archive handling
+- **bcmath** - Arbitrary precision mathematics
+- **opcache** - PHP bytecode caching
+- **pcntl** - Process control
+- **pdo_mysql** - Database connectivity
+- **sockets** - Socket communication
+- **sysvsem** - System V semaphores
+
+#### Process Management with s6-overlay
+
+The image uses [s6-overlay](https://github.com/just-containers/s6-overlay) v3.2.0.2 as an init system and process supervisor:
+
+```dockerfile
+ARG S6_OVERLAY_VERSION=3.2.0.2
+ENV S6_BEHAVIOUR_IF_STAGE2_FAILS=2
+
+ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz /tmp
+RUN tar -C / -Jxpf /tmp/s6-overlay-noarch.tar.xz
+ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-x86_64.tar.xz /tmp
+RUN tar -C / -Jxpf /tmp/s6-overlay-x86_64.tar.xz
+```
+
+This enables running both nginx and PHP-FPM in a single container with proper process supervision.
+
+#### nginx Installation
+
+Nginx is installed from official repositories:
+
+```dockerfile
+ARG NGINX_VERSION=1.29.0
+ARG NJS_VERSION=0.9.1
+
+RUN curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor -o /usr/share/keyrings/nginx-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/nginx-keyring.gpg] http://nginx.org/packages/mainline/debian/ bookworm nginx" > /etc/apt/sources.list.d/nginx.list \
+    && apt-get update && apt-get install -y \
+        nginx=${NGINX_VERSION}-${PKG_RELEASE} \
+        nginx-module-njs=${NGINX_VERSION}+${NJS_VERSION}-${NJS_RELEASE}
+```
+
+Logs are forwarded to Docker:
+```dockerfile
+RUN ln -sf /dev/stdout /var/log/nginx/access.log \
+    && ln -sf /dev/stderr /var/log/nginx/error.log
+```
+
+#### Composer Dependencies
+
+```dockerfile
+COPY --from=composer:2.8.4 /usr/bin/composer /usr/bin/composer
+
+ENV COMPOSER_ALLOW_SUPERUSER=1
+COPY app/composer.json app/composer.lock ./
+
+RUN if [ -z $DEV_DEPS ] || [ $DEV_DEPS = "0" ]; then \
+      composer install --no-dev --optimize-autoloader --no-interaction --no-ansi --no-scripts; \
+    else \
+      composer install --no-interaction --no-ansi --no-scripts; \
+    fi \
+    && composer clear-cache
+```
+
+Production builds exclude dev dependencies and use optimized autoloading.
+
+## nginx Configuration
+
+### Server Block
+
+The nginx configuration (`docker/app/nginx/default.conf`) handles PHP routing:
+
+```nginx
+server {
+    server_name _;
+    listen 80 default_server;
+    listen [::]:80 default_server;
+
+    root /var/www/public;
+    index index.php index.html index.htm;
+
+    charset utf-8;
+
+    # Remove index.php from root URI
+    if ($request_uri ~* "^/index\.php$") {
+        return 301 /;
+    }
+
+    # Remove any trailing slashes
+    if ($request_method = GET) {
+        rewrite ^/(.*)/$ /$1 permanent;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        try_files $uri =404;
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_pass 127.0.0.1:9000;
+        fastcgi_hide_header X-Powered-By;
+    }
+}
+```
+
+Key features:
+- Clean URLs without `index.php`
+- Trailing slash removal
+- PHP-FPM communication on `127.0.0.1:9000`
+- Security headers (Permissions-Policy)
+
+## PHP-FPM Configuration
+
+The PHP-FPM pool configuration (`docker/app/php/php-fpm.conf`):
+
+```ini
+[www]
+pm = static
+pm.max_children = 4
+pm.max_requests = 1000
+
+slowlog = /dev/stdout
+request_slowlog_timeout = 0
+```
+
+- **Process Manager**: Static mode with 4 workers
+- **Max Requests**: Workers restart after 1000 requests
+- **Slow Log**: Disabled (set to 0)
+
+## Development Images
+
+The Dockerfile includes specialized development stages:
+
+### PHP_CodeSniffer Image
+
+```dockerfile
+FROM prod AS php_codesniffer
+
+RUN composer global require doctrine/coding-standard:^12.0 \
+    && phpcs --config-set installed_paths ../../doctrine/coding-standard/lib,../../slevomat/coding-standard
+
+ENTRYPOINT ["phpcs"]
+```
+
+Used for code style checking in CI/CD.
+
+### PHPUnit Image
+
+```dockerfile
+FROM prod AS phpunit
+
+RUN composer global require phpunit/phpunit:^11.5
+
+ENTRYPOINT ["phpunit"]
+```
+
+Used for running unit tests.
+
+## Building the Image
+
+### Local Development
+
+```bash
+docker compose build
+```
+
+This uses the configuration from `docker-compose.yml`:
+
+```yaml
+services:
+  web:
+    environment:
+      - DB_PATH=/var/www/data/cfbmarblegame.db
+    build:
+      dockerfile: docker/app/Dockerfile
+      target: prod
+```
+
+### Production Build
+
+```bash
+docker build \
+  -f docker/app/Dockerfile \
+  --target prod \
+  -t cfbmarblegame:latest \
+  .
+```
+
+## Xdebug Management
+
+Xdebug is installed but disabled by default. Helper scripts are provided:
+
+```bash
+# Enable Xdebug
+enable-xdebug
+
+# Disable Xdebug
+disable-xdebug
+```
+
+Configuration:
+```dockerfile
+ENV XDEBUG_CLIENT_HOST=host.docker.internal
+COPY docker/app/php/xdebug.ini "$PHP_INI_DIR/disabled/"
+```
+
+## Container Startup
+
+The container uses s6-overlay as the entrypoint:
+
+```dockerfile
+ENTRYPOINT ["/init"]
+```
+
+Services are configured in:
+- `/etc/cont-init.d/` - Initialization scripts
+- `/etc/services.d/` - Service definitions (nginx, php-fpm)
+
+## Asset Integration
+
+Built assets from the Tailwind stage are copied into the production image:
+
+```dockerfile
+COPY --from=tailwind /build/dist/asset-manifest.json ./dist/
+COPY --from=tailwind /build/public/styles.*.css ./public/
+```
+
+This ensures compiled CSS is available in the final image.

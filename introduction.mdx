@@ -1,0 +1,100 @@
+---
+title: CFB Marble Game
+description: Simple rules for a complex season - A college football ranking system using a marble-based algorithm
+---
+
+<img
+  className="block dark:hidden"
+  src="/images/hero-light.svg"
+  alt="Hero Light"
+/>
+<img
+  className="hidden dark:block"
+  src="/images/hero-dark.svg"
+  alt="Hero Dark"
+/>
+
+## Welcome to CFB Marble Game
+
+CFB Marble Game is a novel college football ranking system that brings clarity to the chaos of the season using a simple, marble-based algorithm. Instead of subjective polls or complex computer models, this system uses straightforward rules to determine team rankings based on wins, losses, and the quality of opponents.
+
+### Why Marbles?
+
+The marble system provides an intuitive way to visualize team strength throughout the season. Teams accumulate marbles based on their schedule strength, then transfer marbles with each game result. The more marbles you have, the higher your rank - it's that simple.
+
+<Note>
+  The algorithm was originally created by [David Burge (@iowahawkblog)](https://x.com/iowahawkblog/status/1706341845326876998) and has been implemented as an open-source web application.
+</Note>
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card
+    title="Simple Algorithm"
+    icon="calculator"
+    href="/how-it-works"
+  >
+    Four straightforward rules determine the entire ranking system - no black boxes or subjective judgments
+  </Card>
+  <Card
+    title="Schedule Strength Matters"
+    icon="trophy"
+    href="/how-it-works#initial-marbles"
+  >
+    Teams earn bonus marbles for facing power conference opponents, rewarding difficult schedules
+  </Card>
+  <Card
+    title="Home Field Advantage"
+    icon="house"
+    href="/how-it-works#marble-transfers"
+  >
+    Road victories are worth more - teams take 25% of marbles for away wins vs. 20% for home/neutral wins
+  </Card>
+  <Card
+    title="Weekly Rankings"
+    icon="ranking-star"
+    href="/how-it-works#ranking-process"
+  >
+    Rankings update automatically as games are completed, reflecting the latest results
+  </Card>
+</CardGroup>
+
+## Quick Start
+
+<Steps>
+  <Step title="Understand the Rules">
+    Read [How It Works](/how-it-works) to learn the four simple rules that power the marble algorithm
+  </Step>
+  <Step title="Explore the Rankings">
+    View the latest weekly rankings to see how teams stack up based on their marble totals
+  </Step>
+  <Step title="Track Your Team">
+    Follow your favorite team's marble count throughout the season as they win and lose marbles
+  </Step>
+</Steps>
+
+## Built in the Open
+
+CFB Marble Game is an open-source web application built with PHP and powered by the [CollegeFootballData.com API](https://collegefootballdata.com/). The entire codebase is available for anyone to review, contribute to, or learn from.
+
+<CardGroup cols={2}>
+  <Card
+    title="View Source Code"
+    icon="github"
+    href="https://github.com/yourusername/cfb-marble-game"
+  >
+    Explore the implementation on GitHub
+  </Card>
+  <Card
+    title="Local Development"
+    icon="code"
+  >
+    Set up a local dev environment with Docker and Traefik
+  </Card>
+</CardGroup>
+
+---
+
+<Note>
+  Ready to understand how the marble system works? Continue to [How It Works](/how-it-works) to learn the algorithm in detail.
+</Note>

@@ -1,0 +1,161 @@
+---
+title: Game Outcomes
+description: How marbles are transferred when teams win and lose games
+---
+
+## Overview
+
+When teams play games, marbles transfer from the loser to the winner based on the game location and team subdivision. The percentage of marbles transferred varies to reward road victories and account for home field advantage.
+
+## Transfer Percentages
+
+The amount of marbles transferred depends on three factors:
+
+<Steps>
+  <Step title="Check FCS Status">
+    If the **winner** is an FCS team, they receive **25%** of the loser's marbles regardless of location.
+  </Step>
+  
+  <Step title="Check Game Location">
+    If the game is at a **neutral site** (including conference championships), the winner receives **20%** of the loser's marbles.
+  </Step>
+  
+  <Step title="Check Home/Away">
+    - **Away wins**: Winner receives **25%** of the loser's marbles
+    - **Home wins**: Winner receives **20%** of the loser's marbles
+  </Step>
+</Steps>
+
+<Note>
+Away victories are rewarded with a higher percentage (25% vs 20%) to account for the difficulty of winning on the road.
+</Note>
+
+## FCS Special Rules
+
+### FBS Beats FCS
+When an FBS team defeats an FCS opponent, **no marbles are transferred**.
+
+```php MarbleOrchestrator.php:210-216
+if ($loser->subdivision === Subdivision::FCS) {
+    // This also means that games involving 2 FCS teams with marbles won't award
+    // marbles to the winner. Bug in the algorithm?
+    $this->logger->debug('Loser was FCS. No marbles to move.', $loggerContext);
+
+    return;
+}
+```
+
+### FCS Beats FBS
+When an FCS team defeats an FBS opponent, they receive **25%** of the FBS team's marbles.
+
+<Warning>
+**"Because FU coward"** - Losing to an FCS opponent as an FBS team results in a 25% marble penalty with no regard for game location. This is the harshest penalty in the algorithm.
+</Warning>
+
+## Implementation
+
+### Win Percentage Determination
+
+The `determineWinPercentage()` method calculates the transfer percentage:
+
+```php MarbleOrchestrator.php:234-249
+private function determineWinPercentage(Game $game): float
+{
+    if ($this->getWinner($game)->subdivision === Subdivision::FCS) {
+        return 0.25;
+    }
+
+    if ($game->neutralSite) {
+        return 0.2;
+    }
+
+    if ($game->winner === Winner::Away) {
+        return 0.25;
+    }
+
+    return 0.2;
+}
+```
+
+### Marble Transfer Process
+
+The `awardMarbles()` method handles the complete transfer:
+
+```php MarbleOrchestrator.php:180-232
+private function awardMarbles(Game $game): void
+{
+    // ... logging setup ...
+
+    $winner = $this->getWinner($game);
+    $loser = $this->getLoser($game);
+
+    if ($loser->subdivision === Subdivision::FCS) {
+        $this->logger->debug('Loser was FCS. No marbles to move.', $loggerContext);
+        return;
+    }
+
+    $winPercentage = $this->determineWinPercentage($game);
+    $marblesToMove = (int) round($loser->getMarbles() * $winPercentage);
+
+    $loser->giveUpMarbles($marblesToMove);
+    $winner->receiveMarbles($marblesToMove);
+
+    $this->logger->debug('Marbles awarded.', $loggerContext);
+}
+```
+
+### Marble Rounding
+
+Fractional marbles are rounded using PHP's `round()` function (nearest whole number):
+
+```php MarbleOrchestrator.php:222
+$marblesToMove = (int) round($loser->getMarbles() * $winPercentage);
+```
+
+<Note>
+Rounding follows standard rules: 0.5 and above rounds up, below 0.5 rounds down.
+</Note>
+
+## Transfer Examples
+
+### Example 1: Home Victory
+Team A (home, 200 marbles) defeats Team B (away, 150 marbles):
+- Transfer percentage: **20%**
+- Marbles transferred: 150 × 0.20 = **30 marbles**
+- Final: Team A has 230, Team B has 120
+
+### Example 2: Road Victory
+Team C (away, 180 marbles) defeats Team D (home, 220 marbles):
+- Transfer percentage: **25%**
+- Marbles transferred: 220 × 0.25 = **55 marbles**
+- Final: Team C has 235, Team D has 165
+
+### Example 3: Neutral Site (Conference Championship)
+Team E (160 marbles) defeats Team F (190 marbles) in conference championship:
+- Transfer percentage: **20%**
+- Marbles transferred: 190 × 0.20 = **38 marbles**
+- Final: Team E has 198, Team F has 152
+
+### Example 4: FCS Upset
+FCS Team G defeats FBS Team H (210 marbles):
+- Transfer percentage: **25%** (FCS winner)
+- Marbles transferred: 210 × 0.25 = 52.5 → **53 marbles** (rounded)
+- Final: Team G has 53, Team H has 157
+
+### Example 5: FBS Over FCS
+FBS Team I defeats FCS Team J:
+- Transfer percentage: **N/A**
+- Marbles transferred: **0 marbles**
+- No change in marble counts
+
+## Edge Cases
+
+### Two FCS Teams
+If two FCS teams play and both have marbles, **no marbles are transferred** to the winner. This appears to be an unintended quirk of the algorithm noted in the code comments.
+
+### Teams With Zero Marbles
+Teams that have lost all their marbles can still play games, but:
+- If they win: They receive 20% or 25% of opponent's marbles
+- If they lose: No marbles are transferred (0 × percentage = 0)
+
+Once a team reaches zero marbles, they are removed from rankings but continue playing.

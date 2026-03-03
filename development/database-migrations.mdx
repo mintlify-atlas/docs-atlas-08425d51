@@ -1,0 +1,263 @@
+---
+title: Database Migrations
+description: Learn how to create and manage database migrations using Phinx
+---
+
+CFB Marble Game uses [Phinx](https://phinx.org/) for database migrations. This guide covers how to create, run, and manage migrations.
+
+## Overview
+
+The project uses SQLite as its database, with migrations stored in `app/config/phinx/migrations/`. Phinx manages schema changes and tracks which migrations have been applied.
+
+## Configuration
+
+Phinx is configured in `app/config/phinx/phinx.php`:
+
+```php
+return [
+    'paths' => [
+        'migrations' => '%%PHINX_CONFIG_DIR%%/migrations',
+        'seeds' => '%%PHINX_CONFIG_DIR%%/seeds',
+    ],
+    'environments' => [
+        'default_environment' => 'default',
+        'default_migration_table' => 'phinxlog',
+        'default' => [
+            'name'          => $dbPath,
+            'connection'    => $pdo,
+        ],
+    ],
+    'version_order' => 'creation',
+];
+```
+
+The database path is read from the `DB_PATH` environment variable, which defaults to `/var/www/data/cfbmarblegame.db` in the Docker container.
+
+## Running Migrations
+
+To apply all pending migrations, use the `migrate` Make target:
+
+```bash
+make migrate
+```
+
+This executes:
+```bash
+docker exec -it <web-container> composer phinx migrate
+```
+
+Phinx will:
+1. Check which migrations have already been applied
+2. Run any new migrations in chronological order
+3. Update the `phinxlog` table to track the migration status
+
+## Rolling Back Migrations
+
+To rollback the last migration, use:
+
+```bash
+make rollback
+```
+
+This executes:
+```bash
+docker exec -it <web-container> composer phinx rollback
+```
+
+<Warning>
+  Always test rollbacks in development before applying them to production. Ensure your `down()` method correctly reverses the `up()` method.
+</Warning>
+
+## Creating a New Migration
+
+To create a new migration, use the `migration` Make target with a descriptive name:
+
+```bash
+make migration name=CreateUsersTable
+```
+
+This executes:
+```bash
+docker exec -it <web-container> composer phinx create CreateUsersTable
+```
+
+Phinx will generate a new migration file in `app/config/phinx/migrations/` with a timestamp prefix:
+
+```
+20250903111715_create_users_table.php
+```
+
+### Migration Naming Conventions
+
+Use descriptive names in PascalCase that clearly indicate what the migration does:
+
+- `CreateTeamsTable` - Creates a new table
+- `AddEmailToUsersTable` - Adds a column to an existing table
+- `RemoveSeasonTypeColumn` - Removes a column
+- `ReplaceGamesTableToChangeColumnTypesAndAddChecks` - Major structural changes
+
+## Writing Migrations
+
+A migration file contains two methods:
+- `up()` - Applied when running migrations
+- `down()` - Applied when rolling back migrations
+
+### Example: Creating a Table
+
+Here's a real migration from the project that creates the `teams` table:
+
+```php app/config/phinx/migrations/20250903111715_create_teams_table.php
+<?php
+
+declare(strict_types=1);
+
+use Phinx\Migration\AbstractMigration;
+
+final class CreateTeamsTable extends AbstractMigration
+{
+    public function up(): void
+    {
+        $this->execute(<<<'SQL'
+        CREATE TABLE teams (
+            id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            subdivision TEXT NOT NULL,
+            conference TEXT,
+            cfbd_id INTEGER UNIQUE
+        );
+        SQL);
+    }
+
+    public function down(): void
+    {
+        $this->execute('DROP TABLE teams');
+    }
+}
+```
+
+### Key Points
+
+- **Type Declarations**: Use `declare(strict_types=1);` for type safety
+- **Class Names**: Match the migration name in PascalCase
+- **Execute Method**: Use `$this->execute()` for raw SQL (common for SQLite)
+- **Heredoc Syntax**: Use heredoc (`<<<'SQL'`) for multi-line SQL statements
+- **Reversibility**: Ensure `down()` properly reverses `up()`
+
+### Example: Modifying a Table
+
+When making complex changes, you may need to recreate tables (SQLite limitation):
+
+```php
+public function up(): void
+{
+    // SQLite doesn't support ALTER TABLE modifications easily
+    // Often need to recreate the table
+    $this->execute('ALTER TABLE games RENAME TO games_old');
+    
+    $this->execute(<<<'SQL'
+    CREATE TABLE games (
+        id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+        home_team_id INTEGER NOT NULL,
+        away_team_id INTEGER NOT NULL,
+        -- new schema here
+    );
+    SQL);
+    
+    $this->execute('INSERT INTO games SELECT * FROM games_old');
+    $this->execute('DROP TABLE games_old');
+}
+```
+
+## Migration Workflow
+
+<Steps>
+  <Step title="Create Migration">
+    Generate a new migration file:
+    ```bash
+    make migration name=AddColumnToTable
+    ```
+  </Step>
+
+  <Step title="Write Migration Logic">
+    Edit the generated file in `app/config/phinx/migrations/` and implement:
+    - The `up()` method with your schema changes
+    - The `down()` method to reverse those changes
+  </Step>
+
+  <Step title="Test Migration">
+    Apply the migration:
+    ```bash
+    make migrate
+    ```
+    
+    Verify the changes in your database.
+  </Step>
+
+  <Step title="Test Rollback">
+    Ensure the rollback works:
+    ```bash
+    make rollback
+    ```
+    
+    Then re-apply:
+    ```bash
+    make migrate
+    ```
+  </Step>
+
+  <Step title="Commit Migration">
+    Add the migration file to version control:
+    ```bash
+    git add app/config/phinx/migrations/
+    git commit -m "Add migration to create users table"
+    ```
+  </Step>
+</Steps>
+
+## Best Practices
+
+### Always Include Down Methods
+Even if you don't plan to rollback, include a `down()` method for completeness and emergency situations.
+
+### One Logical Change Per Migration
+Keep migrations focused on a single logical change (one table, one feature) for easier debugging and rollback.
+
+### Test Before Committing
+Always test both `up()` and `down()` methods in your local environment before committing.
+
+### Use Transactions Carefully
+Phinx automatically wraps migrations in transactions. Be aware of SQLite's transaction limitations with DDL statements.
+
+### Never Modify Existing Migrations
+Once a migration has been applied in any environment (especially production), never modify it. Create a new migration instead.
+
+## Checking Migration Status
+
+To see which migrations have been applied:
+
+```bash
+docker exec -it $(docker compose ps -q web) composer phinx status
+```
+
+This shows:
+- Migration timestamps
+- Migration names
+- Whether they've been applied
+- When they were applied
+
+## Troubleshooting
+
+### Migration fails to apply
+- Check the error message for SQL syntax issues
+- Verify the database connection is working
+- Ensure the database file has write permissions
+
+### Cannot rollback migration
+- Check that the `down()` method is properly implemented
+- Verify there are no foreign key constraints preventing the rollback
+- Review the migration order if rolling back multiple migrations
+
+### Migration applied but not showing in status
+- Check the `phinxlog` table directly
+- Verify the Phinx configuration points to the correct database
+- Ensure you're checking the right environment

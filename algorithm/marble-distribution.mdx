@@ -1,0 +1,124 @@
+---
+title: Marble Distribution
+description: How teams receive their initial marble allocation
+---
+
+## Overview
+
+Every FBS team starts the season with a base allocation of marbles, with bonus marbles awarded based on their schedule strength. This initial distribution determines each team's starting position in the marble economy.
+
+<Note>
+Only FBS teams receive marbles. FCS teams start with 0 marbles but can acquire them by defeating FBS opponents.
+</Note>
+
+## Initial Allocation Formula
+
+<Steps>
+  <Step title="Base Allocation">
+    Every FBS team receives **100 marbles** as their starting amount.
+  </Step>
+  
+  <Step title="Power Conference Bonus">
+    Teams receive **+10 marbles** for each power conference opponent on their schedule.
+    
+    Power conferences include:
+    - Big Ten
+    - Big 12
+    - ACC
+    - SEC
+  </Step>
+  
+  <Step title="Notre Dame Bonus">
+    Teams receive **+10 marbles** for each game against Notre Dame (treated as a power opponent).
+  </Step>
+</Steps>
+
+## Implementation Details
+
+The marble distribution logic is handled in the `doleOutInitialMarbles()` method:
+
+```php MarbleOrchestrator.php:72-105
+private function doleOutInitialMarbles(Team $team, array $games): void
+{
+    if ($team->subdivision !== Subdivision::FBS) {
+        return;
+    }
+
+    $initialMarbles = 100;
+
+    $powerConferences = [
+        Conference::BigTen,
+        Conference::Big12,
+        Conference::ACC,
+        Conference::SEC,
+    ];
+
+    // Filter out conference championships
+    $games = array_filter($games, static function (Game $game): bool {
+        return $game->weekNumber !== 15;
+    });
+
+    foreach ($this->getOpponents($team, $games) as $opponent) {
+        // Add 10 marbles if opponent is a power conference team
+        if (in_array($opponent->conference, $powerConferences, true)) {
+            $initialMarbles += 10;
+        }
+
+        // Add 10 marbles if the opponent is Notre Dame
+        if ($opponent->teamName === 'Notre Dame') {
+            $initialMarbles += 10;
+        }
+    }
+
+    $team->receiveMarbles($initialMarbles);
+}
+```
+
+<Warning>
+Conference championship games (Week 15) are excluded from the initial marble calculation. Only regular season opponents count toward bonus marbles.
+</Warning>
+
+## Marble Reception
+
+Teams receive marbles through the `receiveMarbles()` method in the Team class:
+
+```php Team.php:23-30
+public function receiveMarbles(int $marbles): void
+{
+    if ($marbles < 0) {
+        throw new InvalidArgumentException('Marbles cannot be negative');
+    }
+
+    $this->marbles += $marbles;
+}
+```
+
+## Example Calculations
+
+### Example 1: Group of 5 Team
+A team from the American Athletic Conference with 2 power conference opponents:
+- Base: 100 marbles
+- Power opponent 1: +10 marbles
+- Power opponent 2: +10 marbles
+- **Total: 120 marbles**
+
+### Example 2: SEC Team
+An SEC team playing 8 conference games and 1 non-conference game against Notre Dame:
+- Base: 100 marbles
+- 8 SEC opponents: +80 marbles (8 × 10)
+- Notre Dame: +10 marbles
+- **Total: 190 marbles**
+
+### Example 3: Independent
+Notre Dame playing 10 power conference opponents:
+- Base: 100 marbles
+- 10 power opponents: +100 marbles (10 × 10)
+- **Total: 200 marbles**
+
+## Key Points
+
+- Only FBS teams receive initial marbles
+- Schedule strength directly impacts starting marble count
+- Power conference teams typically start with more marbles (160-180 range)
+- Group of 5 teams may start with 100-140 marbles depending on their schedule
+- Notre Dame is treated equivalently to power conference teams for bonus purposes

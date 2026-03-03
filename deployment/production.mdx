@@ -1,0 +1,442 @@
+---
+title: Production Deployment
+description: Deploy CFB Marble Game to production using GitHub Actions and Docker Swarm
+---
+
+## Overview
+
+CFB Marble Game uses a fully automated deployment pipeline with GitHub Actions. When code is pushed to the `prod` branch, it automatically builds, tests, and deploys the application to production using Docker Swarm.
+
+## Deployment Architecture
+
+The production environment uses:
+- **Docker Swarm** for container orchestration
+- **Traefik** as reverse proxy and load balancer
+- **GitHub Container Registry** for Docker images
+- **SQLite** database with persistent volume
+- **Automated health checks** for zero-downtime deployments
+
+## GitHub Actions Workflow
+
+The deployment workflow (`.github/workflows/deploy.yml`) runs on:
+- Push to `prod` branch
+- Pull requests (tests only)
+- Manual trigger via `workflow_dispatch`
+
+### Workflow Configuration
+
+```yaml
+name: Deployment
+
+on:
+  push:
+    branches: [ 'prod' ]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  APP_IMAGE: ${{ github.repository_owner }}/cfbmarblegame/app
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+```
+
+### Pipeline Stages
+
+The workflow consists of multiple jobs that run in parallel:
+
+#### 1. Testing Jobs
+
+**Playwright E2E Tests**
+```yaml
+playwright:
+  timeout-minutes: 60
+  runs-on: ubuntu-24.04
+  steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+    - name: Install Playwright Browsers
+      run: cd playwright && npx playwright install --with-deps
+    - name: Build Docker image
+      uses: docker/build-push-action@v6
+    - name: Run Playwright tests
+      env:
+        PW_BASE_URL: http://localhost:9000
+      run: cd playwright && npx playwright test
+```
+
+**Code Quality Checks**
+- `hadolint` - Dockerfile linting
+- `phpcs` - PHP code style (Doctrine Coding Standard)
+- `phpstan` - Static analysis
+- `phpunit` - Unit tests
+
+#### 2. Build Job
+
+```yaml
+build:
+  runs-on: ubuntu-24.04
+  needs: [playwright, hadolint, phpcs, phpstan, phpunit]
+  if: github.ref == 'refs/heads/prod' || github.event_name == 'workflow_dispatch'
+```
+
+The build job:
+1. Runs only after all tests pass
+2. Generates Docker metadata with tags:
+   - `sha:<git-sha>` - Specific commit
+   - `latest` - Latest production build
+3. Builds multi-platform image (linux/amd64)
+4. Pushes to GitHub Container Registry
+
+```yaml
+- name: Build and push
+  uses: docker/build-push-action@v6
+  with:
+    context: .
+    file: docker/app/Dockerfile
+    target: prod
+    push: ${{ github.event_name != 'pull_request' }}
+    tags: ${{ steps.meta.outputs.tags }}
+    cache-from: type=gha
+    cache-to: type=gha,mode=max
+    platforms: linux/amd64
+```
+
+#### 3. Deploy Job
+
+```yaml
+deploy:
+  runs-on: ubuntu-24.04
+  needs: build
+  if: github.ref == 'refs/heads/prod' || github.event_name == 'workflow_dispatch'
+  environment:
+    name: production
+    url: https://cfbmarblegame.com
+  concurrency:
+    group: production
+    cancel-in-progress: false
+```
+
+Key features:
+- Runs only on `prod` branch
+- Uses GitHub environment protection
+- Sequential deployment (no concurrent deploys)
+
+## Production Deployment Process
+
+### SSH Configuration
+
+```yaml
+- name: Configure SSH
+  run: |
+    mkdir -p ~/.ssh
+    echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+    chmod 600 ~/.ssh/id_rsa
+    echo "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+    chmod 644 ~/.ssh/known_hosts
+```
+
+### Docker Swarm Deployment
+
+```yaml
+- name: Deploy to production
+  env:
+    DOCKER_HOST: ssh://deploy@167.99.8.133
+    HEALTH_CHECK_URL: ${{ vars.HEALTH_CHECK_URL }}
+    MAX_RETRIES: 30
+    RETRY_INTERVAL: 10
+  run: |
+    docker network create --driver overlay --scope swarm traefik || true
+    docker stack deploy \
+      --compose-file docker-compose.yml \
+      --compose-file docker-compose.prod.yml \
+      --prune \
+      --with-registry-auth \
+      cfbmarblegame
+```
+
+The deployment:
+1. Creates Traefik overlay network
+2. Deploys stack using compose files
+3. Uses `--prune` to remove old services
+4. Authenticates with GitHub Container Registry
+
+### Health Check Verification
+
+```bash
+function check_health {
+  curl --silent --fail --max-time 5 "$HEALTH_CHECK_URL" > /dev/null
+  return $?
+}
+
+echo "Waiting for health check..."
+retries=0
+until check_health || [ $retries -eq $MAX_RETRIES ]; do
+  echo "Health check failed. Retrying in ${RETRY_INTERVAL}s..."
+  sleep $RETRY_INTERVAL
+  retries=$((retries + 1))
+done
+
+if [ $retries -eq $MAX_RETRIES ]; then
+  echo "Health check failed after $MAX_RETRIES attempts"
+  exit 1
+fi
+
+echo "Deployment successful!"
+```
+
+The deployment waits up to 5 minutes (30 retries × 10s) for the application to become healthy.
+
+## Production Configuration
+
+The `docker-compose.prod.yml` file extends the base configuration:
+
+```yaml
+services:
+  web:
+    image: ${REGISTRY}/${APP_IMAGE}:${GIT_SHORT_SHA}
+    deploy:
+      replicas: 1  # Important: only one replica with SQLite
+      rollback_config:
+        order: start-first
+      update_config:
+        order: start-first
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.cfbmarblegame.entrypoints=websecure
+        - traefik.http.routers.cfbmarblegame.rule=Host(`cfbmarblegame.com`)
+        - traefik.http.services.cfbmarblegame.loadbalancer.server.port=80
+    networks:
+      - traefik
+      - default
+    secrets:
+      - CFBD_API_KEY
+    volumes:
+      - cfbmarblegame_data:/var/www/data
+```
+
+### Key Configuration Details
+
+**Single Replica**
+```yaml
+replicas: 1  # Important: only one replica with SQLite
+```
+SQLite requires a single instance to avoid database locking issues.
+
+**Zero-Downtime Updates**
+```yaml
+rollback_config:
+  order: start-first
+update_config:
+  order: start-first
+```
+New containers start before old ones stop, ensuring continuous availability.
+
+**Traefik Integration**
+```yaml
+labels:
+  - traefik.enable=true
+  - traefik.http.routers.cfbmarblegame.entrypoints=websecure
+  - traefik.http.routers.cfbmarblegame.rule=Host(`cfbmarblegame.com`)
+  - traefik.http.services.cfbmarblegame.loadbalancer.server.port=80
+```
+
+Traefik handles:
+- HTTPS termination
+- Domain routing
+- Load balancing
+
+**Persistent Data**
+```yaml
+volumes:
+  - cfbmarblegame_data:/var/www/data
+```
+
+The SQLite database persists across deployments.
+
+**Secrets Management**
+```yaml
+secrets:
+  - CFBD_API_KEY
+
+secrets:
+  CFBD_API_KEY:
+    external: true
+    name: cfbmarblegame_prod_cfbd_api_key_v1
+```
+
+Sensitive data is managed via Docker Swarm secrets.
+
+## Environment Variables
+
+### Required Secrets
+
+Configure these in GitHub repository settings:
+
+| Secret | Description |
+|--------|-------------|
+| `SSH_PRIVATE_KEY` | SSH key for deployment server access |
+| `SSH_KNOWN_HOSTS` | Known hosts file for SSH verification |
+| `GITHUB_TOKEN` | Automatically provided by GitHub Actions |
+
+### Required Variables
+
+| Variable | Description |
+|----------|-------------|
+| `HEALTH_CHECK_URL` | URL to check application health (e.g., `https://cfbmarblegame.com/health`) |
+
+### Docker Swarm Secrets
+
+Create on the production server:
+
+```bash
+# Create CFBD API key secret
+echo "your-api-key" | docker secret create cfbmarblegame_prod_cfbd_api_key_v1 -
+```
+
+### Application Environment
+
+```yaml
+services:
+  web:
+    environment:
+      - DB_PATH=/var/www/data/cfbmarblegame.db
+```
+
+The database path points to the persistent volume.
+
+## Manual Deployment
+
+To deploy manually:
+
+1. **Trigger Workflow**
+   - Go to Actions tab in GitHub
+   - Select "Deployment" workflow
+   - Click "Run workflow"
+   - Select `prod` branch
+
+2. **SSH Deployment** (alternative)
+   ```bash
+   # SSH to production server
+   ssh deploy@167.99.8.133
+   
+   # Pull latest image
+   docker pull ghcr.io/<owner>/cfbmarblegame/app:latest
+   
+   # Update stack
+   export REGISTRY=ghcr.io
+   export APP_IMAGE=<owner>/cfbmarblegame/app
+   export GIT_SHORT_SHA=latest
+   
+   docker stack deploy \
+     --compose-file docker-compose.yml \
+     --compose-file docker-compose.prod.yml \
+     --prune \
+     --with-registry-auth \
+     cfbmarblegame
+   ```
+
+## Monitoring Deployment
+
+### Check Stack Status
+
+```bash
+docker stack ps cfbmarblegame
+```
+
+### View Logs
+
+```bash
+docker service logs -f cfbmarblegame_web
+```
+
+### Verify Health
+
+```bash
+curl https://cfbmarblegame.com/health
+```
+
+## Rollback
+
+If deployment fails, Docker Swarm automatically rolls back:
+
+```yaml
+rollback_config:
+  order: start-first
+```
+
+Manual rollback to previous version:
+
+```bash
+# Find previous image SHA
+docker image ls | grep cfbmarblegame
+
+# Update GIT_SHORT_SHA to previous version
+export GIT_SHORT_SHA=<previous-sha>
+
+# Redeploy
+docker stack deploy \
+  --compose-file docker-compose.yml \
+  --compose-file docker-compose.prod.yml \
+  cfbmarblegame
+```
+
+## Troubleshooting
+
+### Deployment Fails Health Check
+
+1. Check service logs:
+   ```bash
+   docker service logs cfbmarblegame_web
+   ```
+
+2. Verify container is running:
+   ```bash
+   docker service ps cfbmarblegame_web
+   ```
+
+3. Check health endpoint manually:
+   ```bash
+   docker exec $(docker ps -q -f name=cfbmarblegame_web) curl http://localhost/health
+   ```
+
+### Database Issues
+
+1. Verify volume mount:
+   ```bash
+   docker volume inspect cfbmarblegame_data
+   ```
+
+2. Check database file permissions:
+   ```bash
+   docker exec $(docker ps -q -f name=cfbmarblegame_web) ls -la /var/www/data/
+   ```
+
+### Secret Not Available
+
+1. List secrets:
+   ```bash
+   docker secret ls
+   ```
+
+2. Recreate secret:
+   ```bash
+   docker secret rm cfbmarblegame_prod_cfbd_api_key_v1
+   echo "new-api-key" | docker secret create cfbmarblegame_prod_cfbd_api_key_v1 -
+   ```
+
+## Best Practices
+
+1. **Always test in PR** - The workflow runs all tests on pull requests
+2. **Monitor deployments** - Watch GitHub Actions logs during deployment
+3. **Verify health checks** - Ensure the application responds correctly
+4. **Use semantic commits** - Clear commit messages help track changes
+5. **Keep secrets updated** - Rotate API keys and secrets regularly
+6. **Review logs** - Check application logs after deployment
+7. **Database backups** - Regularly backup the SQLite database volume

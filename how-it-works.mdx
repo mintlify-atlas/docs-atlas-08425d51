@@ -1,0 +1,282 @@
+---
+title: How It Works
+description: Understanding the marble-based ranking algorithm that powers CFB Marble Game
+---
+
+## The Marble Algorithm
+
+The CFB Marble Game ranking system is based on four simple rules. That's it - no complex formulas, no subjective adjustments, just straightforward marble transfers based on game results.
+
+<Note>
+  The algorithm was created by [David Burge (@iowahawkblog)](https://x.com/iowahawkblog/status/1706341845326876998) with a few clarifications for implementation.
+</Note>
+
+---
+
+## Rule 1: Initial Marbles
+
+Every FBS school starts with **100 marbles**, plus bonus marbles based on their schedule strength.
+
+### Power Conference Bonus
+
+Teams earn **10 bonus marbles** for each power conference opponent on their regular season schedule:
+- Big Ten
+- Big 12
+- ACC
+- SEC
+- Notre Dame (treated as a power conference team)
+
+<Warning>
+  Conference championship games (Week 15) are excluded from the initial marble calculation to avoid double-counting opponents.
+</Warning>
+
+### Example
+
+If a team has 8 power conference opponents on their schedule:
+- Base marbles: **100**
+- Bonus marbles: **8 × 10 = 80**
+- **Total starting marbles: 180**
+
+### Implementation
+
+Here's how initial marbles are calculated in the codebase:
+
+```php
+private function doleOutInitialMarbles(Team $team, array $games): void
+{
+    if ($team->subdivision !== Subdivision::FBS) {
+        return;
+    }
+
+    $initialMarbles = 100;
+
+    $powerConferences = [
+        Conference::BigTen,
+        Conference::Big12,
+        Conference::ACC,
+        Conference::SEC,
+    ];
+
+    // Filter out conference championships
+    $games = array_filter($games, static function (Game $game): bool {
+        return $game->weekNumber !== 15;
+    });
+
+    foreach ($this->getOpponents($team, $games) as $opponent) {
+        // Add 10 marbles if opponent is a power conference team
+        if (in_array($opponent->conference, $powerConferences, true)) {
+            $initialMarbles += 10;
+        }
+
+        // Add 10 marbles if the opponent is Notre Dame
+        if ($opponent->teamName === 'Notre Dame') {
+            $initialMarbles += 10;
+        }
+    }
+
+    $team->receiveMarbles($initialMarbles);
+}
+```
+
+*Source: [MarbleOrchestrator.php:72-105](https://github.com/yourusername/cfb-marble-game/blob/main/app/src/Rankings/MarbleOrchestrator.php#L72-L105)*
+
+---
+
+## Rule 2: Marble Transfers
+
+When a team wins a game, they take a percentage of their opponent's marbles. The percentage depends on the game location:
+
+<CardGroup cols={3}>
+  <Card title="Home Win" icon="house">
+    **20%** of opponent's marbles
+  </Card>
+  <Card title="Neutral Site Win" icon="location-dot">
+    **20%** of opponent's marbles
+  </Card>
+  <Card title="Away Win" icon="plane-departure">
+    **25%** of opponent's marbles
+  </Card>
+</CardGroup>
+
+### Why the Difference?
+
+Away wins are worth more (25% vs 20%) to account for the difficulty of winning on the road. This rewards teams that can win in hostile environments.
+
+<Note>
+  Conference championship games are considered neutral site games, even if played at a team's home stadium.
+</Note>
+
+### Implementation
+
+The win percentage is determined by this logic:
+
+```php
+private function determineWinPercentage(Game $game): float
+{
+    if ($this->getWinner($game)->subdivision === Subdivision::FCS) {
+        return 0.25;
+    }
+
+    if ($game->neutralSite) {
+        return 0.2;
+    }
+
+    if ($game->winner === Winner::Away) {
+        return 0.25;
+    }
+
+    return 0.2;
+}
+```
+
+*Source: [MarbleOrchestrator.php:234-249](https://github.com/yourusername/cfb-marble-game/blob/main/app/src/Rankings/MarbleOrchestrator.php#L234-L249)*
+
+---
+
+## Rule 3: Rounding
+
+Fractional marbles are rounded to the nearest whole number using standard rounding rules.
+
+### Example
+
+If you beat an opponent with **210 marbles** at their home field:
+- Marble transfer: **210 × 0.25 = 52.5**
+- Rounded result: **53 marbles**
+
+### Implementation
+
+The marble transfer calculation with rounding:
+
+```php
+$winPercentage = $this->determineWinPercentage($game);
+$marblesToMove = (int) round($loser->getMarbles() * $winPercentage);
+
+$loser->giveUpMarbles($marblesToMove);
+$winner->receiveMarbles($marblesToMove);
+```
+
+*Source: [MarbleOrchestrator.php:218-225](https://github.com/yourusername/cfb-marble-game/blob/main/app/src/Rankings/MarbleOrchestrator.php#L218-L225)*
+
+<Note>
+  PHP's `round()` function uses "round half up" by default, so 0.5 rounds up to 1.
+</Note>
+
+---
+
+## Rule 4: FCS Opponents
+
+Games against FCS (Football Championship Subdivision) opponents are handled specially:
+
+- **FBS team wins**: No marbles awarded (you get nothing for beating a lower division team)
+- **FCS team wins**: FCS team takes **25%** of the FBS team's marbles (penalty for losing to FCS)
+
+<Warning>
+  If you lose to an FCS opponent, they get 25% of your marbles. **Because FU coward.**
+</Warning>
+
+### Implementation
+
+FCS games are handled in the marble award logic:
+
+```php
+private function awardMarbles(Game $game): void
+{
+    $winner = $this->getWinner($game);
+    $loser = $this->getLoser($game);
+
+    if ($loser->subdivision === Subdivision::FCS) {
+        // FBS team beat FCS team - no marbles awarded
+        $this->logger->debug('Loser was FCS. No marbles to move.', $loggerContext);
+        return;
+    }
+
+    // If winner is FCS and loser is FBS, FCS team gets 25%
+    $winPercentage = $this->determineWinPercentage($game);
+    // ... marble transfer logic
+}
+```
+
+*Source: [MarbleOrchestrator.php:210-216](https://github.com/yourusername/cfb-marble-game/blob/main/app/src/Rankings/MarbleOrchestrator.php#L210-L216)*
+
+---
+
+## Ranking Process
+
+Once marbles have been distributed through all completed games, teams are ranked using a standard competition ranking system:
+
+<Steps>
+  <Step title="Sort by Marbles">
+    Teams are sorted by marble count in descending order. Teams with the same marble count are sorted alphabetically.
+  </Step>
+  <Step title="Assign Ranks">
+    Teams receive ranks based on their marble totals. Multiple teams with the same marble count receive the same rank.
+  </Step>
+  <Step title="Handle Ties">
+    When teams tie, the next rank accounts for the number of tied teams (e.g., if two teams tie for #3, the next team is #5, not #4).
+  </Step>
+</Steps>
+
+### Example Ranking
+
+| Rank | Team | Marbles |
+|------|------|--------:|
+| 1 | Georgia | 285 |
+| 2 | Ohio State | 267 |
+| 3 | Alabama | 245 |
+| 3 | Michigan | 245 |
+| 5 | Texas | 232 |
+
+### Implementation
+
+The ranking algorithm:
+
+```php
+private function applyStandardCompetitionRanking(array $teams): array
+{
+    $teams = $this->sortByMarblesDescendingThenAlphabetically($teams);
+
+    $rankedTeams = [];
+    $currentRank = 1;
+    $previousMarbles = null;
+    $teamsAtCurrentMarbleCount = 0;
+
+    foreach ($teams as $team) {
+        if ($previousMarbles !== null && $team->getMarbles() < $previousMarbles) {
+            $currentRank += $teamsAtCurrentMarbleCount;
+            $teamsAtCurrentMarbleCount = 0;
+        }
+
+        $teamsAtCurrentMarbleCount++;
+        $previousMarbles = $team->getMarbles();
+        $team->setMarbleRank($currentRank);
+
+        $rankedTeams[] = $team;
+    }
+
+    return $rankedTeams;
+}
+```
+
+*Source: [MarbleOrchestrator.php:274-296](https://github.com/yourusername/cfb-marble-game/blob/main/app/src/Rankings/MarbleOrchestrator.php#L274-L296)*
+
+---
+
+## That's It!
+
+Those are the only four rules. No strength of schedule adjustments, no quality win bonuses, no computer models - just marbles changing hands based on game results.
+
+<CardGroup cols={2}>
+  <Card
+    title="View Rankings"
+    icon="ranking-star"
+  >
+    See the current marble rankings
+  </Card>
+  <Card
+    title="Source Code"
+    icon="code"
+    href="https://github.com/yourusername/cfb-marble-game"
+  >
+    Explore the implementation
+  </Card>
+</CardGroup>

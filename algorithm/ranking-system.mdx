@@ -1,0 +1,180 @@
+---
+title: Ranking System
+description: How teams are ranked and how ties are handled
+---
+
+## Overview
+
+Teams are ranked using a **Standard Competition Ranking** system (also known as "1224" ranking) where teams with equal marble counts receive the same rank, and the next rank accounts for the number of tied teams.
+
+## Ranking Process
+
+<Steps>
+  <Step title="Filter Active Teams">
+    Only teams with at least 1 marble are included in the rankings. Teams that have lost all their marbles are removed.
+    
+    ```php MarbleOrchestrator.php:136-146
+    private function removeTeamsWithoutMarbles(array $teams): array
+    {
+        return array_values(
+            array_filter(
+                $teams,
+                static function (Team $team): bool {
+                    return $team->getMarbles() > 0;
+                },
+            ),
+        );
+    }
+    ```
+  </Step>
+  
+  <Step title="Sort Teams">
+    Teams are sorted by:
+    1. **Marble count** (descending - most marbles first)
+    2. **Team name** (alphabetically - for tiebreaking)
+    
+    ```php MarbleOrchestrator.php:304-313
+    private function sortByMarblesDescendingThenAlphabetically(array $teams): array
+    {
+        uasort($teams, static function (Team $a, Team $b): int {
+            $marbleComparison = $b->getMarbles() <=> $a->getMarbles();
+
+            return $marbleComparison !== 0 ? $marbleComparison : $a->teamName <=> $b->teamName;
+        });
+
+        return $teams;
+    }
+    ```
+  </Step>
+  
+  <Step title="Apply Standard Competition Ranking">
+    Ranks are assigned using the "1224" method where tied teams share a rank and the next rank skips accordingly.
+  </Step>
+</Steps>
+
+## Standard Competition Ranking
+
+The algorithm uses **Standard Competition Ranking** (Olympic ranking style):
+
+- Teams with the same marble count receive the **same rank**
+- The next rank is calculated by adding the number of tied teams
+- This creates rank sequences like: 1, 2, 2, 4, 5, 5, 5, 8...
+
+### Implementation
+
+```php MarbleOrchestrator.php:274-297
+private function applyStandardCompetitionRanking(array $teams): array
+{
+    $teams = $this->sortByMarblesDescendingThenAlphabetically($teams);
+
+    $rankedTeams = [];
+    $currentRank = 1;
+    $previousMarbles = null;
+    $teamsAtCurrentMarbleCount = 0;
+
+    foreach ($teams as $team) {
+        if ($previousMarbles !== null && $team->getMarbles() < $previousMarbles) {
+            $currentRank += $teamsAtCurrentMarbleCount;
+            $teamsAtCurrentMarbleCount = 0;
+        }
+
+        $teamsAtCurrentMarbleCount++;
+        $previousMarbles = $team->getMarbles();
+        $team->setMarbleRank($currentRank);
+
+        $rankedTeams[] = $team;
+    }
+
+    return $rankedTeams;
+}
+```
+
+## Tiebreaking Rules
+
+When teams have the **same marble count**, they are ranked alphabetically by team name.
+
+<Note>
+Alphabetical tiebreaking only affects the **display order** of tied teams. All tied teams receive the **same numerical rank**.
+</Note>
+
+### Example: Three-Way Tie
+
+If Ohio State, Oregon, and Penn State all have 250 marbles:
+- All three teams are ranked **#2** (assuming one team is #1)
+- Display order: Ohio State, Oregon, Penn State (alphabetical)
+- The next team with fewer marbles would be ranked **#5** (not #3)
+
+## Complete Ranking Example
+
+| Team Name | Marbles | Rank | Notes |
+|-----------|---------|------|-------|
+| Georgia | 315 | **1** | Most marbles |
+| Ohio State | 250 | **2** | Tied - alphabetically first |
+| Oregon | 250 | **2** | Tied - alphabetically second |
+| Penn State | 250 | **2** | Tied - alphabetically third |
+| Texas | 220 | **5** | Rank skips to account for 3-way tie |
+| Alabama | 220 | **5** | Tied with Texas |
+| Michigan | 185 | **7** | Rank skips to account for 2-way tie |
+| USC | 140 | **8** | |
+
+## The Complete Flow
+
+The main ranking method orchestrates the entire process:
+
+```php MarbleOrchestrator.php:34-47
+public function getRankedTeams(int $week, array $teams, array $games): array
+{
+    foreach ($teams as $team) {
+        $this->doleOutInitialMarbles($team, $games);
+    }
+
+    foreach ($this->gamesUntilWeek($week, $games) as $game) {
+        $this->awardMarbles($game);
+    }
+
+    $teams = $this->removeTeamsWithoutMarbles($teams);
+
+    return $this->applyStandardCompetitionRanking($teams);
+}
+```
+
+<Steps>
+  <Step title="Initialize">
+    All FBS teams receive their initial marble allocation based on schedule strength.
+  </Step>
+  
+  <Step title="Process Games">
+    Games are processed in chronological order (week by week) and marbles are transferred after each game.
+  </Step>
+  
+  <Step title="Filter">
+    Teams with zero marbles are removed from the rankings.
+  </Step>
+  
+  <Step title="Rank">
+    Remaining teams are sorted and ranked using Standard Competition Ranking.
+  </Step>
+</Steps>
+
+## Rank Storage
+
+Each team stores its rank internally:
+
+```php Team.php:46-53
+public function setMarbleRank(int $rank): void
+{
+    if ($rank < 0) {
+        throw new InvalidArgumentException('Rank cannot be negative');
+    }
+
+    $this->marbleRank = $rank;
+}
+```
+
+## Key Properties
+
+- **Zero marbles = No ranking**: Teams must have at least 1 marble to be ranked
+- **Ties preserve rank numbers**: Multiple teams can share the same rank
+- **Gap in rankings**: After a tie, the next rank reflects the number of tied teams
+- **Alphabetical order**: Provides consistent ordering within ties
+- **Week-by-week processing**: Games are processed chronologically to ensure accurate marble transfers

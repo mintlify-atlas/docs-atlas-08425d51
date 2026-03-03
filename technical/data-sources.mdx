@@ -1,0 +1,513 @@
+---
+title: Data Sources
+description: CollegeFootballData.com API integration, data refresh process, and SQLite database schema
+---
+
+## Overview
+
+The CFB Marble Game sources all college football data from the [CollegeFootballData.com API](https://collegefootballdata.com). Data is fetched periodically, processed, and stored in a SQLite database for fast local access.
+
+## CollegeFootballData.com API
+
+### Authentication
+
+API access requires a bearer token:
+
+```php Container.php:79-92
+DataRefreshCommand::class => static function (ContainerInterface $c) {
+    $apiKey = self::getSecret('CFBD_API_KEY');
+
+    return new DataRefreshCommand(
+        new Client([
+            'base_uri' => 'https://api.collegefootballdata.com',
+            RequestOptions::HEADERS => [
+                'Authorization' => 'Bearer ' . $apiKey,
+                'Accept' => 'application/json',
+            ],
+        ]),
+        $c->get(PDO::class),
+    );
+}
+```
+
+<ParamField path="base_uri" type="string">
+  Base URL for all API requests: `https://api.collegefootballdata.com`
+</ParamField>
+
+<ParamField path="Authorization" type="string">
+  Bearer token authentication header
+</ParamField>
+
+### Games Endpoint
+
+The application fetches game data from the `/games` endpoint:
+
+```php GamesDataRefresher.php:105-122
+private function fetchFromCfbdApi(): array
+{
+    $apiResponse = $this->cfbdApiClient->get(
+        '/games',
+        [
+            RequestOptions::QUERY => [
+                'year' => '2025',
+                'classification' => 'fbs',
+                'seasonType' => 'regular',
+            ],
+        ],
+    )->getBody()->getContents();
+
+    /** @var CfbdApiGamesResponse $data */
+    $data = json_decode($apiResponse, true, flags: JSON_THROW_ON_ERROR);
+
+    return $data;
+}
+```
+
+**Query parameters:**
+
+<ParamField query="year" type="string" required>
+  Season year (currently hardcoded to `2025`)
+</ParamField>
+
+<ParamField query="classification" type="string" required>
+  Team classification: `fbs` (Football Bowl Subdivision)
+</ParamField>
+
+<ParamField query="seasonType" type="string" required>
+  Type of season: `regular` (excludes bowl games and playoffs)
+</ParamField>
+
+### API Response Structure
+
+The API returns an array of game objects with this structure:
+
+```typescript
+interface CfbdApiGame {
+  id: number;
+  season: number;
+  week: number;
+  seasonType: string;
+  startDate: string;
+  startTimeTBD: boolean;
+  completed: boolean;
+  neutralSite: boolean;
+  conferenceGame: boolean;
+  attendance: number | null;
+  venueId: number;
+  venue: string;
+  homeId: number;
+  homeTeam: string;
+  homeClassification: string;
+  homeConference: string;
+  homePoints: number;
+  homeLineScores: number[];
+  homePostgameWinProbability: number;
+  homePregameElo: number | null;
+  homePostgameElo: number | null;
+  awayId: number;
+  awayTeam: string;
+  awayClassification: string;
+  awayConference: string;
+  awayPoints: number;
+  awayLineScores: number[];
+  awayPostgameWinProbability: number;
+  awayPregameElo: number | null;
+  awayPostgameElo: number | null;
+  excitementIndex: number;
+  highlights: string;
+  notes: string | null;
+}
+```
+
+## Data Refresh Process
+
+The data refresh is managed by the `DataRefreshCommand` Symfony Console command:
+
+```bash
+php bin/console data:refresh
+```
+
+### Refresh Workflow
+
+```php GamesDataRefresher.php:85-102
+public function pullAndStoreFreshData(): void
+{
+    $this->logger->notice('Starting data refresh from the CollegeFootballData.com API...');
+
+    $data = $this->fetchFromCfbdApi();
+    $this->logger->notice('Successfully fetched data');
+
+    [$games, $teams] = $this->extractGamesAndTeams($data);
+    $this->logger->notice('Extracted ' . count($teams) . ' teams and ' . count($games) . ' games');
+
+    $this->saveTeams($teams);
+
+    $games = $this->applyDataCorrectionsToGames($games);
+
+    $this->saveGames($games);
+
+    $this->logger->notice('Data refresh completed successfully');
+}
+```
+
+**Process steps:**
+
+1. **Fetch** - Retrieve all games from CFBD API
+2. **Extract** - Parse games and teams from API response
+3. **Save Teams** - Upsert team records to database
+4. **Apply Corrections** - Fix known data issues
+5. **Save Games** - Upsert game records to database
+
+### Data Extraction
+
+The extraction process transforms API data into application models:
+
+```php GamesDataRefresher.php:129-170
+private function extractGamesAndTeams(array $data): array
+{
+    $games = [];
+    $teams = [];
+
+    foreach ($data as $game) {
+        $gameId = (int) $game['id'];
+
+        $gameDate = DateTimeImmutable::createFromFormat(DateFormat::CFBDAPI, $game['startDate']);
+        if ($gameDate === false) {
+            throw new RuntimeException('Failed to parse game date: ' . $game['startDate']);
+        }
+
+        $games[$gameId] = [
+            'date' => $gameDate,
+            'week_number' => (int) $game['week'],
+            'neutral_site' => (int) $game['neutralSite'],
+            'home_team_cfbd_id' => (int) $game['homeId'],
+            'away_team_cfbd_id' => (int) $game['awayId'],
+            'home_team_points' => $game['homePoints'],
+            'away_team_points' => $game['awayPoints'],
+        ];
+
+        $homeId = (int) $game['homeId'];
+
+        $teams[$homeId] = [
+            'name' => $game['homeTeam'],
+            'subdivision' => Subdivision::fromString($game['homeClassification']),
+            'conference' => Conference::fromString($game['homeConference']),
+        ];
+
+        $awayId = (int) $game['awayId'];
+
+        $teams[$awayId] = [
+            'name' => $game['awayTeam'],
+            'subdivision' => Subdivision::fromString($game['awayClassification']),
+            'conference' => Conference::fromString($game['awayConference']),
+        ];
+    }
+
+    return [$games, $teams];
+}
+```
+
+**Key transformations:**
+- Parse ISO 8601 date strings to `DateTimeImmutable`
+- Convert string enums to typed PHP enums (`Subdivision`, `Conference`)
+- Index arrays by CFBD IDs for efficient lookup
+
+### Data Corrections
+
+Known data quality issues are corrected before storage:
+
+```php GamesDataRefresher.php:227-237
+private function applyDataCorrectionsToGames(array $games): array
+{
+    foreach ($games as $cfbdId => $game) {
+        // Sam Houston home games are hosted at Shell Energy Stadium for 2025. 
+        // These are not neutral site games.
+        if (in_array($cfbdId, [401757224, 401757279, 401757284, 401757300, 401757311], true)) {
+            $games[$cfbdId]['neutral_site'] = 0;
+        }
+    }
+
+    return $games;
+}
+```
+
+### Winner Determination
+
+Game winners are determined from final scores:
+
+```php GamesDataRefresher.php:293-314
+private function determineWinner(array $game): Winner|null
+{
+    if ($game['home_team_points'] === null || $game['away_team_points'] === null) {
+        return null;
+    }
+
+    if ($game['home_team_points'] > $game['away_team_points']) {
+        return Winner::Home;
+    }
+
+    if ($game['home_team_points'] < $game['away_team_points']) {
+        return Winner::Away;
+    }
+
+    $this->logger->error(
+        'Home and away team points are equal for the week ' . $game['week_number'] . ' game between ' .
+        $game['home_team_cfbd_id'] . ' and ' . $game['away_team_cfbd_id'] . '. Not declaring a winner yet.',
+    );
+
+    return null;
+}
+```
+
+**Winner states:**
+- `Winner::Home` - Home team won
+- `Winner::Away` - Away team won  
+- `null` - Game not yet completed or tied
+
+## SQLite Database
+
+### Schema Overview
+
+The application uses two primary tables:
+
+- `teams` - Team master data
+- `games` - Game results and schedule
+
+Migrations are managed by [Phinx](https://phinx.org/):
+
+```bash
+composer phinx migrate
+```
+
+### Teams Table
+
+```sql
+CREATE TABLE teams (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cfbd_id INTEGER NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    subdivision TEXT NOT NULL,
+    conference TEXT NOT NULL
+);
+```
+
+**Columns:**
+
+<ParamField path="id" type="integer">
+  Internal primary key (auto-increment)
+</ParamField>
+
+<ParamField path="cfbd_id" type="integer">
+  CollegeFootballData.com team ID (unique)
+</ParamField>
+
+<ParamField path="name" type="text">
+  Team name (e.g., "Alabama", "Ohio State")
+</ParamField>
+
+<ParamField path="subdivision" type="text">
+  `FBS` or `FCS`
+</ParamField>
+
+<ParamField path="conference" type="text">
+  Conference abbreviation (e.g., "SEC", "Big Ten")
+</ParamField>
+
+### Games Table
+
+```sql
+CREATE TABLE games (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cfbd_id INTEGER NOT NULL UNIQUE,
+    date TEXT NOT NULL,
+    week_number INTEGER NOT NULL,
+    neutral_site INTEGER NOT NULL,
+    home_team_id INTEGER NOT NULL REFERENCES teams(id),
+    away_team_id INTEGER NOT NULL REFERENCES teams(id),
+    winner TEXT
+);
+```
+
+**Columns:**
+
+<ParamField path="id" type="integer">
+  Internal primary key (auto-increment)
+</ParamField>
+
+<ParamField path="cfbd_id" type="integer">
+  CollegeFootballData.com game ID (unique)
+</ParamField>
+
+<ParamField path="date" type="text">
+  Game date in ISO 8601 format
+</ParamField>
+
+<ParamField path="week_number" type="integer">
+  Season week (1-15 for regular season)
+</ParamField>
+
+<ParamField path="neutral_site" type="integer">
+  Boolean flag (0 or 1) indicating neutral site game
+</ParamField>
+
+<ParamField path="home_team_id" type="integer">
+  Foreign key to `teams.id`
+</ParamField>
+
+<ParamField path="away_team_id" type="integer">
+  Foreign key to `teams.id`
+</ParamField>
+
+<ParamField path="winner" type="text" optional>
+  `Home`, `Away`, or `NULL` for incomplete games
+</ParamField>
+
+### Upsert Strategy
+
+Both tables use INSERT ... ON CONFLICT to handle updates:
+
+```php GamesDataRefresher.php:178-185
+$stmt = $this->pdo->prepare(<<<'SQL'
+INSERT INTO teams (name, subdivision, conference, cfbd_id)
+    VALUES (:name, :subdivision, :conference, :cfbd_id)
+ON CONFLICT(cfbd_id) DO UPDATE SET
+    name = :name,
+    subdivision = :subdivision,
+    conference = :conference;
+SQL);
+```
+
+This allows the refresh command to be run repeatedly without duplicating data.
+
+## Database Access
+
+### Repository Pattern
+
+All database access goes through repositories:
+
+```php SqliteTeamRepository.php:26-50
+public function getTeams(): array
+{
+    $query = $this->pdo->query(
+        'SELECT id, name, subdivision, conference FROM teams',
+        PDO::FETCH_ASSOC,
+    );
+
+    if ($query === false) {
+        throw new RuntimeException('Failed to fetch teams from database');
+    }
+
+    $teams = [];
+
+    /** @var TeamRow $row */
+    foreach ($query as $row) {
+        $teams[] = new Team(
+            TeamId::fromDatabase($row['id']),
+            $row['name'],
+            Subdivision::fromString($row['subdivision']),
+            Conference::fromString($row['conference']),
+        );
+    }
+
+    return $teams;
+}
+```
+
+### Caching Strategy
+
+The `CachedTeamRepository` implements an Identity Map pattern:
+
+```php CachedTeamRepository.php:20-32
+public function getTeams(): array
+{
+    if ($this->identityMap->count() === 0) {
+        $teams = $this->repository->getTeams();
+
+        foreach ($teams as $team) {
+            $this->identityMap->add($team->id, $team);
+        }
+    }
+
+    return $this->identityMap->getAll();
+}
+```
+
+**Benefits:**
+- Ensures single instance per team (important for marble calculations)
+- Reduces database queries
+- Maintains object identity across the request
+
+## Data Refresh Scheduling
+
+The application does not include built-in scheduling. Recommended approaches:
+
+### Cron Job
+
+```cron
+# Refresh data every hour during football season
+0 * * * * cd /app && php bin/console data:refresh >> /var/log/cfb-refresh.log 2>&1
+```
+
+### Kubernetes CronJob
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cfb-data-refresh
+spec:
+  schedule: "0 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: refresh
+            image: cfb-marble-game:latest
+            command: ["php", "bin/console", "data:refresh"]
+          restartPolicy: OnFailure
+```
+
+### GitHub Actions (for small deployments)
+
+```yaml
+name: Refresh CFB Data
+on:
+  schedule:
+    - cron: '0 * * * *'
+workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Run data refresh
+        run: |
+          docker compose run --rm app php bin/console data:refresh
+```
+
+## Performance Considerations
+
+### API Rate Limits
+
+Be mindful of CollegeFootballData.com API rate limits:
+- Free tier: typically allows reasonable request rates
+- Premium tier: higher limits for production use
+
+### Database Performance
+
+SQLite performs well for this use case because:
+- Dataset is relatively small (< 1000 teams, < 1000 games per season)
+- Read-heavy workload (writes only during refresh)
+- No concurrent write requirements
+- Simple queries with proper indexes
+
+For higher traffic, consider PostgreSQL or MySQL.
+
+## Data Freshness
+
+Game data updates as games complete:
+- **Pre-game**: `winner` is `NULL`
+- **Post-game**: `winner` is set to `Home` or `Away`
+- Refresh frequency determines how quickly rankings update after games

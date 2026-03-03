@@ -1,0 +1,339 @@
+---
+title: Application Architecture
+description: Overview of the CFB Marble Game PHP application structure, dependency injection, and routing
+---
+
+## Overview
+
+The CFB Marble Game is built as a modern PHP application using:
+
+- **PHP 8.4** with strict typing and modern language features
+- **Dependency Injection** via PHP-DI for service management
+- **FastRoute** for HTTP routing
+- **Sapien** for request/response handling
+- **SQLite** for data persistence
+- **Monolog** for logging
+
+## Application Bootstrap
+
+The application initializes through a two-stage bootstrap process:
+
+### Bootstrap.php
+
+The `Bootstrap` class handles application initialization:
+
+```php Bootstrap.php:14-38
+final readonly class Bootstrap
+{
+    public static function init(): ContainerInterface
+    {
+        $container = Container::init();
+
+        if (getenv('DEBUG_MODE')) {
+            $isJsonRequest = ($_SERVER['CONTENT_TYPE'] ?? '') === 'application/json';
+
+            $errorHandler = $container->get(WhoopsErrorHandler::class);
+            assert($errorHandler instanceof WhoopsErrorHandler);
+
+            if ($isJsonRequest) {
+                $errorHandler->registerJsonResponder();
+            } else {
+                $errorHandler->registerHtmlResponder();
+            }
+        }
+
+        ErrorHandler::register($container->get(Logger::class));
+
+        return $container;
+    }
+}
+```
+
+**Key responsibilities:**
+- Initialize the dependency injection container
+- Configure error handling (Whoops for development, Monolog for production)
+- Return configured container for service resolution
+
+### Container.php
+
+The `Container` class configures all service definitions:
+
+```php Container.php:35-43
+public static function init(): ContainerInterface
+{
+    $builder = new ContainerBuilder();
+    $builder->useAutowiring(true);
+    $builder->useAttributes(false);
+    $builder->addDefinitions(self::definitions());
+
+    return $builder->build();
+}
+```
+
+**Configuration features:**
+- Autowiring enabled for automatic dependency resolution
+- Explicit definitions for complex services
+- Secret management via environment variables or Docker secrets
+
+## Dependency Injection
+
+The application uses PHP-DI with explicit service definitions for core components:
+
+### Core Service Definitions
+
+<CodeGroup>
+
+```php Router
+Dispatcher::class => static function (ContainerInterface $c) {
+    return simpleDispatcher($c->get(Routes::class));
+}
+```
+
+```php Database
+PDO::class => static function () {
+    return new PDO('sqlite:' . getenv('DB_PATH'));
+}
+```
+
+```php Logger
+Logger::class => static function () {
+    $serverData = $_SERVER;
+    $serverData['REMOTE_ADDR'] = $_SERVER['HTTP_X_REAL_IP'] ?? $_SERVER['REMOTE_ADDR'];
+
+    return new Logger('app')
+        ->pushHandler(new StreamHandler(
+            'php://stdout',
+            getenv('LOG_LEVEL') ?: Level::Notice,
+        ))
+        ->pushProcessor(new WebProcessor($serverData));
+}
+```
+
+```php Repositories
+TeamRepository::class => static function (ContainerInterface $c) {
+    return new CachedTeamRepository(
+        new SqliteTeamRepository(
+            $c->get(PDO::class),
+        ),
+    );
+}
+
+GameRepository::class => static function (ContainerInterface $c) {
+    return new SqliteGameRepository(
+        $c->get(PDO::class),
+        $c->get(TeamRepository::class),
+    );
+}
+```
+
+</CodeGroup>
+
+### Repository Pattern
+
+The application implements the Repository pattern with decorator support:
+
+- **Interfaces** define contracts (`TeamRepository`, `GameRepository`)
+- **SQLite implementations** provide data access
+- **Cached decorators** wrap repositories for performance (e.g., `CachedTeamRepository`)
+
+## HTTP Request Flow
+
+### 1. Front Controller
+
+The `FrontController` orchestrates the request/response cycle:
+
+```php FrontController.php:18-24
+public function run(): void
+{
+    $this->responseHandler->handleResponse(
+        $this->requestHandler->handleRequest(
+            new Request(),
+        ),
+    );
+}
+```
+
+### 2. Request Handler
+
+The `RequestHandler` manages routing and action invocation:
+
+```php RequestHandler.php:34-72
+public function handleRequest(Request $request): Response
+{
+    $routeInfo = $this->dispatcher->dispatch(
+        $request->method->name ?? '',
+        rawurldecode($request->url->path ?? ''),
+    );
+
+    switch ($routeInfo[0]) {
+        case Dispatcher::NOT_FOUND:
+            $callable  = $this->notFound;
+            $arguments = [];
+            break;
+
+        case Dispatcher::METHOD_NOT_ALLOWED:
+            $callable  = $this->methodNotAllowed;
+            $arguments = [$routeInfo[1]];
+            break;
+
+        default:
+            $callable = $this->container->get($routeInfo[1]);
+            assert(is_callable($callable));
+            $arguments = $routeInfo[2];
+            break;
+    }
+
+    $response = $this->getInvoker($request)
+        ->call($callable, $arguments);
+
+    if (! ($response instanceof Response)) {
+        throw new RuntimeException(sprintf(
+            'Action response must be %s',
+            Response::class,
+        ));
+    }
+
+    return $response;
+}
+```
+
+**Key features:**
+- FastRoute dispatching with method and path resolution
+- Automatic dependency injection for route handlers
+- Type-safe response validation
+
+### 3. Route Definition
+
+Routes are defined in the `Routes` class:
+
+```php Routes.php:16-26
+public function __invoke(RouteCollector $r): void
+{
+    $r->get('/', Home::class);
+
+    $r->addGroup('/QZfvbotRlJ/test-routes', static function (RouteCollector $r): void {
+        $r->get('/plain', GetPlain::class);
+        $r->get('/only-args/{first}/{second}', GetOnlyArgs::class);
+        $r->get('/only-query-param', GetOnlyQueryParam::class);
+        $r->get('/args-and-query-param/{required}[/{optional:\d+}]', GetArgsAndQueryParam::class);
+    });
+}
+```
+
+**Route handler contract:**
+- Must be callable (implement `__invoke`)
+- Must return `Sapien\Response`
+- Can type-hint dependencies in constructor or `__invoke` method
+
+## Templating
+
+The application uses native PHP templates:
+
+- Templates are `.html.php` files
+- Located alongside their corresponding action classes
+- Rendered using simple `include` with variable extraction
+- No complex templating engine required
+
+## Dependencies
+
+From `composer.json`:
+
+<CodeGroup>
+
+```json Core Dependencies
+"php": "^8.4",
+"ext-pdo": "*",
+"guzzlehttp/guzzle": "^7.10",
+"monolog/monolog": "^3.8",
+"nikic/fast-route": "^1.3",
+"php-di/php-di": "^7.0",
+"sapien/sapien": "^1.1"
+```
+
+```json Development Tools
+"filp/whoops": "^2.16",
+"symfony/var-dumper": "^7.3"
+```
+
+```json CLI & Database
+"symfony/console": "^7.3",
+"robmorgan/phinx": "^0.16.10"
+```
+
+</CodeGroup>
+
+## Architecture Principles
+
+### Domain-Driven Design
+
+- Domain logic isolated in `App\Rankings` namespace
+- Clear separation between domain models and infrastructure
+- Value objects for type safety (`TeamId`, `GameId`, `Conference`, `Subdivision`)
+
+### SOLID Principles
+
+- **Single Responsibility**: Each class has one clear purpose
+- **Dependency Inversion**: Depend on interfaces, not concrete implementations
+- **Interface Segregation**: Small, focused interfaces (e.g., `TeamRepository`)
+
+### Immutability
+
+- Extensive use of `readonly` classes and properties
+- Value objects are immutable
+- Domain events (marble transfers) modify mutable state on `Team` objects
+
+## Error Handling
+
+### Development Mode
+
+- Whoops error handler with pretty HTML/JSON error pages
+- Activated via `DEBUG_MODE` environment variable
+- Content-type aware (HTML vs JSON)
+
+### Production Mode
+
+- Monolog error handler
+- Logs to stdout (container-friendly)
+- Configurable log level via `LOG_LEVEL` environment variable
+- Web processor adds request context to log entries
+
+## Configuration
+
+Configuration is managed through environment variables:
+
+- `DB_PATH` - Path to SQLite database file
+- `LOG_LEVEL` - Monolog log level (defaults to Notice)
+- `DEBUG_MODE` - Enable Whoops error handler
+- `CFBD_API_KEY` - CollegeFootballData.com API key (via env or Docker secret)
+
+### Secret Management
+
+The application supports two methods for secret storage:
+
+```php Container.php:99-120
+private static function getSecret(string $name): string
+{
+    $secretValue = getenv($name);
+
+    if ($secretValue) {
+        return $secretValue;
+    }
+
+    $dockerSecretPath = '/run/secrets/' . $name;
+
+    if (! file_exists($dockerSecretPath)) {
+        throw new RuntimeException('Docker secret file not found: ' . $dockerSecretPath);
+    }
+
+    $secretValue = file_get_contents($dockerSecretPath);
+
+    if ($secretValue === false) {
+        throw new RuntimeException('Failed to read secret: ' . $dockerSecretPath);
+    }
+
+    return trim($secretValue);
+}
+```
+
+1. **Environment variables** (for local development)
+2. **Docker secrets** (for production deployment)

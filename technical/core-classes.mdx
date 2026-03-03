@@ -1,0 +1,741 @@
+---
+title: Core Classes
+description: Documentation of key classes including MarbleOrchestrator, Team, Game, and repositories
+---
+
+## Overview
+
+The CFB Marble Game is built around a core set of domain classes that implement the marble ranking algorithm. This page documents the key classes, their responsibilities, and their public APIs.
+
+## MarbleOrchestrator
+
+The `MarbleOrchestrator` is the heart of the marble ranking algorithm. It orchestrates the entire process of distributing initial marbles, processing games, and ranking teams.
+
+**Location:** `App\Rankings\MarbleOrchestrator`
+
+### Constructor
+
+```php
+public function __construct(private LoggerInterface $logger)
+```
+
+<ParamField path="logger" type="LoggerInterface" required>
+  PSR-3 logger for debugging marble transfers
+</ParamField>
+
+### Public Methods
+
+#### getRankedTeams
+
+Calculates and returns the ranked teams based on marble distribution for a given week.
+
+```php MarbleOrchestrator.php:34-47
+public function getRankedTeams(int $week, array $teams, array $games): array
+{
+    foreach ($teams as $team) {
+        $this->doleOutInitialMarbles($team, $games);
+    }
+
+    foreach ($this->gamesUntilWeek($week, $games) as $game) {
+        $this->awardMarbles($game);
+    }
+
+    $teams = $this->removeTeamsWithoutMarbles($teams);
+
+    return $this->applyStandardCompetitionRanking($teams);
+}
+```
+
+<ParamField path="week" type="int" required>
+  The week number to calculate rankings through
+</ParamField>
+
+<ParamField path="teams" type="Team[]" required>
+  Array of all Team objects
+</ParamField>
+
+<ParamField path="games" type="Game[]" required>
+  Array of all Game objects for the season
+</ParamField>
+
+<ResponseField name="return" type="Team[]">
+  Array of ranked Team objects with marble counts and ranks set
+</ResponseField>
+
+**Algorithm steps:**
+1. Distribute initial marbles to all teams
+2. Process all completed games through the specified week
+3. Remove teams with zero marbles
+4. Apply standard competition ranking (teams with same marbles get same rank)
+
+#### determineMostRecentWeekWithAllGamesCompleted
+
+Finds the most recent week where all games have been completed.
+
+```php MarbleOrchestrator.php:50-69
+public function determineMostRecentWeekWithAllGamesCompleted(array $games): int
+{
+    $gamesByWeek = [];
+
+    foreach ($games as $game) {
+        $gamesByWeek[$game->weekNumber][] = $game;
+    }
+
+    ksort($gamesByWeek);
+
+    $mostRecentCompleteWeek = 0;
+
+    foreach ($gamesByWeek as $week => $gamesForTheWeek) {
+        if ($this->isWeekComplete($gamesForTheWeek)) {
+            $mostRecentCompleteWeek = $week;
+        }
+    }
+
+    return $mostRecentCompleteWeek;
+}
+```
+
+<ParamField path="games" type="Game[]" required>
+  Array of all Game objects for the season
+</ParamField>
+
+<ResponseField name="return" type="int">
+  The week number of the most recent completed week (0 if no weeks are complete)
+</ResponseField>
+
+### Initial Marble Distribution
+
+The algorithm distributes initial marbles based on strength of schedule:
+
+```php MarbleOrchestrator.php:72-105
+private function doleOutInitialMarbles(Team $team, array $games): void
+{
+    if ($team->subdivision !== Subdivision::FBS) {
+        return;
+    }
+
+    $initialMarbles = 100;
+
+    $powerConferences = [
+        Conference::BigTen,
+        Conference::Big12,
+        Conference::ACC,
+        Conference::SEC,
+    ];
+
+    // Filter out conference championships
+    $games = array_filter($games, static function (Game $game): bool {
+        return $game->weekNumber !== 15;
+    });
+
+    foreach ($this->getOpponents($team, $games) as $opponent) {
+        // Add 10 marbles if opponent is a power conference team
+        if (in_array($opponent->conference, $powerConferences, true)) {
+            $initialMarbles += 10;
+        }
+
+        // Add 10 marbles if the opponent is Notre Dame
+        if ($opponent->teamName === 'Notre Dame') {
+            $initialMarbles += 10;
+        }
+    }
+
+    $team->receiveMarbles($initialMarbles);
+}
+```
+
+**Distribution rules:**
+- **Base**: 100 marbles for all FBS teams
+- **Power conference opponent**: +10 marbles per P4 opponent (SEC, Big Ten, Big 12, ACC)
+- **Notre Dame opponent**: +10 marbles (Notre Dame is independent but P4-caliber)
+- **FCS teams**: 0 marbles
+
+### Marble Transfer Logic
+
+When games are processed, marbles transfer from loser to winner:
+
+```php MarbleOrchestrator.php:180-232
+private function awardMarbles(Game $game): void
+{
+    // ... logging context setup ...
+
+    $winner = $this->getWinner($game);
+    $loser = $this->getLoser($game);
+
+    if ($loser->subdivision === Subdivision::FCS) {
+        $this->logger->debug('Loser was FCS. No marbles to move.', $loggerContext);
+        return;
+    }
+
+    $winPercentage = $this->determineWinPercentage($game);
+
+    $marblesToMove = (int) round($loser->getMarbles() * $winPercentage);
+
+    $loser->giveUpMarbles($marblesToMove);
+    $winner->receiveMarbles($marblesToMove);
+
+    $this->logger->debug('Marbles awarded.', $loggerContext);
+}
+```
+
+**Transfer calculation:**
+
+```php MarbleOrchestrator.php:234-249
+private function determineWinPercentage(Game $game): float
+{
+    if ($this->getWinner($game)->subdivision === Subdivision::FCS) {
+        return 0.25;
+    }
+
+    if ($game->neutralSite) {
+        return 0.2;
+    }
+
+    if ($game->winner === Winner::Away) {
+        return 0.25;
+    }
+
+    return 0.2;
+}
+```
+
+**Win percentages:**
+- **FCS team beats FBS team**: 25% of loser's marbles
+- **Away team wins**: 25% of loser's marbles
+- **Neutral site win**: 20% of loser's marbles
+- **Home team wins**: 20% of loser's marbles
+
+### Ranking Algorithm
+
+Teams are ranked using standard competition ranking (1224 ranking):
+
+```php MarbleOrchestrator.php:274-297
+private function applyStandardCompetitionRanking(array $teams): array
+{
+    $teams = $this->sortByMarblesDescendingThenAlphabetically($teams);
+
+    $rankedTeams = [];
+    $currentRank = 1;
+    $previousMarbles = null;
+    $teamsAtCurrentMarbleCount = 0;
+
+    foreach ($teams as $team) {
+        if ($previousMarbles !== null && $team->getMarbles() < $previousMarbles) {
+            $currentRank += $teamsAtCurrentMarbleCount;
+            $teamsAtCurrentMarbleCount = 0;
+        }
+
+        $teamsAtCurrentMarbleCount++;
+        $previousMarbles = $team->getMarbles();
+        $team->setMarbleRank($currentRank);
+
+        $rankedTeams[] = $team;
+    }
+
+    return $rankedTeams;
+}
+```
+
+**Example:** If three teams tie with 150 marbles:
+- Rank 1: Team A (150 marbles)
+- Rank 1: Team B (150 marbles)  
+- Rank 1: Team C (150 marbles)
+- Rank 4: Team D (140 marbles)
+
+## Team
+
+Represents a college football team with mutable marble state.
+
+**Location:** `App\Rankings\Teams\Team`
+
+### Constructor
+
+```php Team.php:15-21
+public function __construct(
+    public readonly TeamId $id,
+    public readonly string $teamName,
+    public readonly Subdivision $subdivision,
+    public readonly Conference $conference,
+) {}
+```
+
+<ParamField path="id" type="TeamId" required>
+  Unique team identifier (value object)
+</ParamField>
+
+<ParamField path="teamName" type="string" required>
+  Team name (e.g., "Alabama", "Ohio State")
+</ParamField>
+
+<ParamField path="subdivision" type="Subdivision" required>
+  `Subdivision::FBS` or `Subdivision::FCS`
+</ParamField>
+
+<ParamField path="conference" type="Conference" required>
+  Conference enum value (e.g., `Conference::SEC`)
+</ParamField>
+
+### Public Methods
+
+#### receiveMarbles
+
+Adds marbles to the team's total.
+
+```php Team.php:23-30
+public function receiveMarbles(int $marbles): void
+{
+    if ($marbles < 0) {
+        throw new InvalidArgumentException('Marbles cannot be negative');
+    }
+
+    $this->marbles += $marbles;
+}
+```
+
+<ParamField path="marbles" type="int" required>
+  Number of marbles to add (must be non-negative)
+</ParamField>
+
+#### giveUpMarbles
+
+Removes marbles from the team's total.
+
+```php Team.php:32-39
+public function giveUpMarbles(int $marbles): void
+{
+    if ($marbles < 0) {
+        throw new InvalidArgumentException('Marbles cannot be negative');
+    }
+
+    $this->marbles -= $marbles;
+}
+```
+
+<ParamField path="marbles" type="int" required>
+  Number of marbles to remove (must be non-negative)
+</ParamField>
+
+<Note>
+  This method can result in negative marble counts if more marbles are removed than the team has. The algorithm design prevents this in practice.
+</Note>
+
+#### getMarbles
+
+Returns the current marble count.
+
+```php Team.php:41-44
+public function getMarbles(): int
+{
+    return $this->marbles;
+}
+```
+
+<ResponseField name="return" type="int">
+  Current number of marbles owned by the team
+</ResponseField>
+
+#### setMarbleRank / getMarbleRank
+
+Sets and retrieves the team's rank in the marble standings.
+
+```php Team.php:46-58
+public function setMarbleRank(int $rank): void
+{
+    if ($rank < 0) {
+        throw new InvalidArgumentException('Rank cannot be negative');
+    }
+
+    $this->marbleRank = $rank;
+}
+
+public function getMarbleRank(): int
+{
+    return $this->marbleRank;
+}
+```
+
+## Game
+
+Represents a single college football game.
+
+**Location:** `App\Rankings\Games\Game`
+
+### Constructor
+
+```php Game.php:12-21
+public function __construct(
+    public readonly GameId $id,
+    public readonly DateTimeInterface $date,
+    public readonly int $weekNumber,
+    public readonly bool $neutralSite,
+    public readonly Team $homeTeam,
+    public readonly Team $awayTeam,
+    public readonly Winner|null $winner,
+) {}
+```
+
+<ParamField path="id" type="GameId" required>
+  Unique game identifier (value object)
+</ParamField>
+
+<ParamField path="date" type="DateTimeInterface" required>
+  Game date and time
+</ParamField>
+
+<ParamField path="weekNumber" type="int" required>
+  Season week (1-15 for regular season)
+</ParamField>
+
+<ParamField path="neutralSite" type="bool" required>
+  Whether the game is played at a neutral site
+</ParamField>
+
+<ParamField path="homeTeam" type="Team" required>
+  Reference to the home Team object
+</ParamField>
+
+<ParamField path="awayTeam" type="Team" required>
+  Reference to the away Team object
+</ParamField>
+
+<ParamField path="winner" type="Winner|null" required>
+  `Winner::Home`, `Winner::Away`, or `null` for incomplete games
+</ParamField>
+
+<Note>
+  The `Game` class is fully immutable. All properties are readonly and set via constructor.
+</Note>
+
+## TeamRepository
+
+Interface for retrieving team data.
+
+**Location:** `App\Rankings\Teams\TeamRepository`
+
+### Interface Definition
+
+```php TeamRepository.php:7-13
+interface TeamRepository
+{
+    /** @return Team[] */
+    public function getTeams(): array;
+
+    public function getTeam(TeamId $teamId): Team;
+}
+```
+
+#### getTeams
+
+Retrieves all teams.
+
+<ResponseField name="return" type="Team[]">
+  Array of all Team objects
+</ResponseField>
+
+#### getTeam
+
+Retrieves a single team by ID.
+
+<ParamField path="teamId" type="TeamId" required>
+  The team identifier
+</ParamField>
+
+<ResponseField name="return" type="Team">
+  The requested Team object
+</ResponseField>
+
+<ResponseField name="throws" type="RuntimeException">
+  If team is not found
+</ResponseField>
+
+### Implementations
+
+#### SqliteTeamRepository
+
+Loads teams from SQLite database.
+
+```php SqliteTeamRepository.php:26-50
+public function getTeams(): array
+{
+    $query = $this->pdo->query(
+        'SELECT id, name, subdivision, conference FROM teams',
+        PDO::FETCH_ASSOC,
+    );
+
+    if ($query === false) {
+        throw new RuntimeException('Failed to fetch teams from database');
+    }
+
+    $teams = [];
+
+    foreach ($query as $row) {
+        $teams[] = new Team(
+            TeamId::fromDatabase($row['id']),
+            $row['name'],
+            Subdivision::fromString($row['subdivision']),
+            Conference::fromString($row['conference']),
+        );
+    }
+
+    return $teams;
+}
+```
+
+#### CachedTeamRepository
+
+Decorator that caches teams using the Identity Map pattern.
+
+```php CachedTeamRepository.php:20-32
+public function getTeams(): array
+{
+    if ($this->identityMap->count() === 0) {
+        $teams = $this->repository->getTeams();
+
+        foreach ($teams as $team) {
+            $this->identityMap->add($team->id, $team);
+        }
+    }
+
+    return $this->identityMap->getAll();
+}
+```
+
+<Warning>
+  The `CachedTeamRepository` ensures that only one instance of each Team exists per request. This is critical for the marble algorithm to work correctly, as marble transfers modify Team objects in place.
+</Warning>
+
+## GameRepository
+
+Interface for retrieving game data.
+
+**Location:** `App\Rankings\Games\GameRepository`
+
+### Interface Definition
+
+```php GameRepository.php:7-11
+interface GameRepository
+{
+    /** @return Game[] */
+    public function getGames(): array;
+}
+```
+
+#### getGames
+
+Retrieves all games.
+
+<ResponseField name="return" type="Game[]">
+  Array of all Game objects for the season
+</ResponseField>
+
+### Implementation
+
+#### SqliteGameRepository
+
+Loads games from SQLite database with eager team loading.
+
+```php SqliteGameRepository.php:23-65
+public function getGames(): array
+{
+    $query = $this->pdo->query(
+        'SELECT id, date, week_number, neutral_site, home_team_id, away_team_id, winner FROM games',
+        PDO::FETCH_ASSOC,
+    );
+
+    if ($query === false) {
+        throw new RuntimeException('Failed to fetch games from database');
+    }
+
+    $games = [];
+
+    // Load all teams to build up the cache in the team repository
+    $this->teamRepository->getTeams();
+
+    foreach ($query as $row) {
+        $gameDate = DateTimeImmutable::createFromFormat(DateFormat::SQLITE, $row['date']);
+
+        if ($gameDate === false) {
+            throw new RuntimeException('Failed to parse game date: ' . $row['date']);
+        }
+
+        $winner = null;
+
+        if ($row['winner'] !== null) {
+            $winner = Winner::from($row['winner']);
+        }
+
+        $games[] = new Game(
+            GameId::fromDatabase($row['id']),
+            $gameDate,
+            (int) $row['week_number'],
+            (bool) $row['neutral_site'],
+            $this->teamRepository->getTeam(TeamId::fromDatabase($row['home_team_id'])),
+            $this->teamRepository->getTeam(TeamId::fromDatabase($row['away_team_id'])),
+            $winner,
+        );
+    }
+
+    return $games;
+}
+```
+
+<Note>
+  The repository preloads all teams before constructing Game objects. This ensures the CachedTeamRepository cache is populated, so each team has exactly one instance shared across all games.
+</Note>
+
+## Value Objects
+
+### TeamId
+
+Unique identifier for teams.
+
+```php
+final readonly class TeamId
+{
+    private function __construct(public int $id) {}
+    
+    public static function fromDatabase(int $id): self
+    {
+        return new self($id);
+    }
+}
+```
+
+### GameId
+
+Unique identifier for games.
+
+```php
+final readonly class GameId
+{
+    private function __construct(public int $id) {}
+    
+    public static function fromDatabase(int $id): self
+    {
+        return new self($id);
+    }
+}
+```
+
+### Conference (Enum)
+
+Represents NCAA conferences.
+
+```php
+enum Conference: string
+{
+    case SEC = 'SEC';
+    case BigTen = 'Big Ten';
+    case Big12 = 'Big 12';
+    case ACC = 'ACC';
+    case Pac12 = 'Pac-12';
+    // ... other conferences
+    
+    public static function fromString(string $conference): self
+    {
+        return self::from($conference);
+    }
+}
+```
+
+### Subdivision (Enum)
+
+Represents NCAA subdivision.
+
+```php
+enum Subdivision
+{
+    case FBS;
+    case FCS;
+    
+    public static function fromString(string $subdivision): self
+    {
+        return match ($subdivision) {
+            'fbs' => self::FBS,
+            'fcs' => self::FCS,
+        };
+    }
+}
+```
+
+### Winner (Enum)
+
+Represents game outcome.
+
+```php
+enum Winner: string
+{
+    case Home = 'Home';
+    case Away = 'Away';
+}
+```
+
+## Class Diagram
+
+```
+┌─────────────────────┐
+│ MarbleOrchestrator  │
+├─────────────────────┤
+│ + getRankedTeams()  │
+│ + determine...Week()│
+└──────────┬──────────┘
+           │ uses
+           ├──────────────────┐
+           │                  │
+           ▼                  ▼
+    ┌──────────┐       ┌──────────┐
+    │   Team   │◄──────│   Game   │
+    ├──────────┤       ├──────────┤
+    │ marbles  │       │ winner   │
+    │ rank     │       │ homeTeam │
+    ├──────────┤       │ awayTeam │
+    │ receive()│       └──────────┘
+    │ giveUp() │
+    └────▲─────┘
+         │ created by
+         │
+┌────────┴───────────┐
+│  TeamRepository    │
+│  ◄implements►      │
+├────────────────────┤
+│ SqliteTeamRepo     │
+│ CachedTeamRepo     │
+└────────────────────┘
+
+┌────────────────────┐
+│  GameRepository    │
+│  ◄implements►      │
+├────────────────────┤
+│ SqliteGameRepo     │
+└────────────────────┘
+```
+
+## Usage Example
+
+Here's how the core classes work together:
+
+```php
+// 1. Load data from repositories
+$teamRepository = $container->get(TeamRepository::class);
+$gameRepository = $container->get(GameRepository::class);
+
+$teams = $teamRepository->getTeams();
+$games = $gameRepository->getGames();
+
+// 2. Determine current week
+$orchestrator = $container->get(MarbleOrchestrator::class);
+$currentWeek = $orchestrator->determineMostRecentWeekWithAllGamesCompleted($games);
+
+// 3. Calculate rankings
+$rankedTeams = $orchestrator->getRankedTeams($currentWeek, $teams, $games);
+
+// 4. Display rankings
+foreach ($rankedTeams as $team) {
+    echo sprintf(
+        "#%d %s - %d marbles\n",
+        $team->getMarbleRank(),
+        $team->teamName,
+        $team->getMarbles()
+    );
+}
+```

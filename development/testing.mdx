@@ -1,0 +1,337 @@
+---
+title: Testing
+description: Learn how to run PHPUnit, Playwright, PHPStan, and PHPCS tests
+---
+
+CFB Marble Game uses multiple testing and code quality tools to ensure reliability and maintainability.
+
+## Overview
+
+The project uses:
+- **PHPUnit** - Unit and integration testing for PHP code
+- **Playwright** - End-to-end browser testing
+- **PHPStan** - Static analysis for PHP code
+- **PHPCS** - Code style checking and fixing
+
+All testing tools run in isolated Docker containers defined in `docker-compose.tools.yml`.
+
+## Running All Quality Checks
+
+To run all code quality tools at once:
+
+```bash
+make quality
+```
+
+This executes:
+```bash
+make hadolint phpcbf phpcs phpstan
+```
+
+This will run:
+1. Hadolint - Dockerfile linting
+2. PHPCBF - PHP Code Beautifier and Fixer (auto-fixes style issues)
+3. PHPCS - PHP_CodeSniffer (checks for style issues)
+4. PHPStan - Static analysis
+
+## PHPUnit
+
+### Running PHPUnit Tests
+
+To run all PHPUnit tests:
+
+```bash
+make phpunit
+```
+
+This executes:
+```bash
+docker compose -p cfbmarblegame-tools -f docker-compose.tools.yml run --rm phpunit
+```
+
+### PHPUnit Configuration
+
+The PHPUnit container:
+- Uses the `phpunit` build target from `docker/app/Dockerfile`
+- Mounts the `app/` directory as a volume
+- Copies Composer dependencies to `/var/www/tools/phpunit/`
+- Runs the `phpunit` command
+
+<Note>
+  PHPUnit test files and configuration are defined in the application code. The exact test structure depends on your project setup.
+</Note>
+
+## Playwright
+
+Playwright runs end-to-end tests in real browsers to verify application functionality.
+
+### Installing Playwright
+
+Before running tests for the first time, install Playwright dependencies:
+
+```bash
+make playwright-install
+```
+
+This:
+- Creates an empty `playwright/.env` file if it doesn't exist
+- Runs `npm ci` to install Node.js dependencies
+- Automatically detects if Node.js is available locally or uses Docker
+
+### Running Playwright Tests
+
+To run the Playwright test suite:
+
+```bash
+make playwright-test
+```
+
+This executes tests against `https://cfbmarblegame.test` by default.
+
+**Requirements:**
+- Your local development environment must be running (`docker compose up`)
+- The application must be accessible at the configured URL
+
+### Viewing Test Reports
+
+To view the HTML test report:
+
+```bash
+make playwright-report
+```
+
+This opens an interactive report showing:
+- Test results and status
+- Screenshots and videos of failures
+- Detailed trace information
+- Performance metrics
+
+### Playwright Configuration
+
+The test configuration is defined in `playwright/playwright.config.ts`:
+
+```typescript
+export default defineConfig({
+  testDir: __dirname + '/tests',
+  fullyParallel: true,
+  forbidOnly: !!process.env.CI,
+  retries: process.env.CI ? 2 : 0,
+  workers: process.env.CI ? 1 : undefined,
+  reporter: [
+    ['html'],
+    ...(process.env.CI ? [['github'], ['json', { outputFile: 'results.json' }]] : []),
+  ],
+  use: {
+    baseURL: process.env.PW_BASE_URL ?? 'http://localhost:9000',
+    trace: 'on-first-retry',
+    video: 'retain-on-failure',
+  },
+});
+```
+
+### Example Test
+
+Here's a basic test from `playwright/tests/basic.spec.ts`:
+
+```typescript
+import { test, expect } from '@playwright/test';
+
+test('landing page', async ({ page }) => {
+  await page.goto('/');
+
+  await expect(page).toHaveTitle('College Football Marble Game');
+  await expect(page.getByAltText('College Football Marble Game')).toBeVisible();
+});
+
+test('returns 404 not found', async ({ request }) => {
+  const response = await request.get('/nonexistent-route-SiwyTfsfZ8t8KGInW71B');
+  expect(response.status()).toBe(404);
+});
+```
+
+Tests verify:
+- Page titles and content visibility
+- HTTP status codes (404, 405, 200)
+- Route parameters and query strings
+- JSON response bodies
+
+### Writing New Tests
+
+Create test files in `playwright/tests/` with the `.spec.ts` extension:
+
+```typescript
+import { test, expect } from '@playwright/test';
+
+test('test description', async ({ page }) => {
+  await page.goto('/your-route');
+  // Your test assertions here
+});
+```
+
+## PHPStan
+
+PHPStan performs static analysis to catch bugs without running the code.
+
+### Running PHPStan
+
+```bash
+make phpstan
+```
+
+This executes:
+```bash
+docker compose -p cfbmarblegame-tools -f docker-compose.tools.yml run --rm phpstan
+```
+
+PHPStan will:
+- Analyze all PHP files according to your configuration
+- Report type errors, undefined variables, and other issues
+- Return a non-zero exit code if errors are found
+
+### PHPStan Configuration
+
+The PHPStan container:
+- Uses the official `ghcr.io/phpstan/phpstan:2.0.4-php8.4` image
+- Mounts the `app/` directory to `/app`
+- Copies the PHPStan binary to `/app/tools/phpstan/`
+- Runs analysis based on `phpstan.neon` or `phpstan.neon.dist`
+
+## PHPCS and PHPCBF
+
+PHP_CodeSniffer (PHPCS) checks code style, while PHP Code Beautifier and Fixer (PHPCBF) automatically fixes style issues.
+
+### Automatically Fix Style Issues
+
+```bash
+make phpcbf
+```
+
+This executes:
+```bash
+docker compose -p cfbmarblegame-tools -f docker-compose.tools.yml run --rm phpcbf
+```
+
+PHPCBF will:
+- Scan your PHP files for style violations
+- Automatically fix issues it can (indentation, spacing, etc.)
+- Report any issues that require manual fixing
+
+### Check for Style Issues
+
+```bash
+make phpcs
+```
+
+This executes:
+```bash
+docker compose -p cfbmarblegame-tools -f docker-compose.tools.yml run --rm phpcs
+```
+
+PHPCS will:
+- Check code against the configured coding standard
+- Report violations without modifying files
+- Return a non-zero exit code if violations are found
+
+### Workflow Recommendation
+
+<Steps>
+  <Step title="Run PHPCBF First">
+    Start by auto-fixing what can be fixed:
+    ```bash
+    make phpcbf
+    ```
+  </Step>
+
+  <Step title="Check Remaining Issues">
+    Run PHPCS to see what's left:
+    ```bash
+    make phpcs
+    ```
+  </Step>
+
+  <Step title="Fix Manual Issues">
+    Address any remaining style violations that couldn't be auto-fixed.
+  </Step>
+
+  <Step title="Verify">
+    Run PHPCS again to confirm all issues are resolved:
+    ```bash
+    make phpcs
+    ```
+  </Step>
+</Steps>
+
+## Hadolint
+
+Hadolint lints Dockerfiles to ensure best practices.
+
+### Running Hadolint
+
+```bash
+make hadolint
+```
+
+This executes:
+```bash
+docker run --rm -i -v $(pwd)/.hadolint.yaml:/.hadolint.yaml hadolint/hadolint < $(pwd)/docker/app/Dockerfile
+```
+
+Hadolint checks:
+- Best practices for Dockerfile instructions
+- Security issues
+- Common mistakes
+- Optimization opportunities
+
+## Continuous Integration
+
+All these tools should be run in your CI/CD pipeline to ensure code quality:
+
+```yaml
+# Example CI workflow
+- name: Run Quality Checks
+  run: make quality
+
+- name: Run PHPUnit Tests
+  run: make phpunit
+
+- name: Run Playwright Tests
+  run: make playwright-test
+```
+
+## Test Environment Variables
+
+### Playwright
+
+Create `playwright/.env` from `playwright/.env.example` to configure:
+- `PW_BASE_URL` - Base URL for tests (default: `http://localhost:9000`)
+- Other Playwright-specific settings
+
+### Application
+
+Ensure your `app/.env` is configured for testing:
+```bash
+DEBUG_MODE=true
+LOG_LEVEL=debug
+```
+
+## Troubleshooting
+
+### Playwright tests fail to connect
+- Ensure the development server is running: `docker compose ps`
+- Verify the URL is accessible: `curl https://cfbmarblegame.test`
+- Check the `PW_BASE_URL` environment variable
+
+### PHPUnit tests can't find classes
+- Ensure Composer dependencies are installed
+- Verify the autoloader is configured correctly
+- Check that the `app/` directory is mounted properly
+
+### PHPCS/PHPCBF changes aren't persisted
+- Ensure you have write permissions on the `app/` directory
+- Check that the volume mount is working: `docker compose ps`
+- Verify the files aren't read-only
+
+### PHPStan reports memory errors
+- Increase Docker memory allocation
+- Reduce the scope of analysis in `phpstan.neon`
+- Use PHPStan's `--memory-limit` flag if needed
