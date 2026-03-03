@@ -1,0 +1,70 @@
+{
+  "projectType": "saas",
+  "projectName": "CFB Marble Game",
+  "projectDescription": "A college football ranking system using a marble-based algorithm to track team performance throughout the season",
+  "theme": "aspen",
+  "primaryColor": "#1e40af",
+  "lightColor": "#3b82f6",
+  "darkColor": "#1e3a8a",
+  "navigation": {
+    "groups": [
+      {
+        "group": "Overview",
+        "pages": [
+          "introduction",
+          "how-it-works"
+        ]
+      },
+      {
+        "group": "The Algorithm",
+        "pages": [
+          "algorithm/marble-distribution",
+          "algorithm/game-outcomes",
+          "algorithm/ranking-system"
+        ]
+      },
+      {
+        "group": "Technical Documentation",
+        "pages": [
+          "technical/architecture",
+          "technical/data-sources",
+          "technical/core-classes"
+        ]
+      },
+      {
+        "group": "Development",
+        "pages": [
+          "development/local-setup",
+          "development/database-migrations",
+          "development/testing"
+        ]
+      },
+      {
+        "group": "Deployment",
+        "pages": [
+          "deployment/docker",
+          "deployment/production"
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Marble-based college football ranking algorithm",
+    "Weekly rankings calculated from game outcomes",
+    "Power conference bonus marbles",
+    "Real-time data from CollegeFootballData.com API",
+    "Historical week-by-week rankings view",
+    "FBS and FCS team support"
+  ],
+  "publicApiSurface": [
+    "GET / - Home page with current rankings",
+    "GET /?week={number} - Rankings for specific week",
+    "MarbleOrchestrator::getRankedTeams() - Calculate team rankings",
+    "MarbleOrchestrator::determineMostRecentWeekWithAllGamesCompleted() - Find latest complete week",
+    "Team::receiveMarbles() - Award marbles to team",
+    "Team::giveUpMarbles() - Remove marbles from team",
+    "GameRepository - Fetch and store game data",
+    "TeamRepository - Fetch and store team data",
+    "DataRefreshCommand - CLI command to refresh data from API"
+  ]
+}
