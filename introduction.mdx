@@ -5,12 +5,12 @@ description: Simple rules for a complex season - A college football ranking syst
 
 <img
   className="block dark:hidden"
-  src="/images/hero-light.svg"
+  src="/images/hero-light.png"
   alt="Hero Light"
 />
 <img
   className="hidden dark:block"
-  src="/images/hero-dark.svg"
+  src="/images/hero-dark.png"
   alt="Hero Dark"
 />
 
@@ -59,6 +59,18 @@ The marble system provides an intuitive way to visualize team strength throughou
   </Card>
 </CardGroup>
 
+## Using the Rankings
+
+The CFB Marble Game displays weekly rankings through a simple web interface:
+
+- **Current Rankings**: Visit the home page to see the latest rankings
+- **Historical Rankings**: View rankings for any completed week using the week selector
+- **Week Navigation**: Rankings are available from Week 1 (Preseason) through Week 17 (Final)
+
+<Note>
+  You can view rankings for any specific week by using the `?week=` query parameter (e.g., `?week=5` for Week 5 rankings).
+</Note>
+
 ## Quick Start
 
 <Steps>
@@ -81,13 +93,14 @@ CFB Marble Game is an open-source web application built with PHP and powered by 
   <Card
     title="View Source Code"
     icon="github"
-    href="https://github.com/yourusername/cfb-marble-game"
+    href="https://github.com/kevinsmith/CFBMarbleGame"
   >
     Explore the implementation on GitHub
   </Card>
   <Card
     title="Local Development"
     icon="code"
+    href="/development/local-setup"
   >
     Set up a local dev environment with Docker and Traefik
   </Card>
